@@ -13,6 +13,50 @@ CH592（RISC-V，BLE 5.4）燃气表读数器固件，使用 CR2032 供电，TCR
 固件内置 WCH BackupUpgrade OTA：应用运行在 Image A，OTA 写入 Image B，校验通过
 后由 IAP 在重启时拷贝回 A；失败继续跑旧固件。OTA 完成后通过 `0x53` 上报新版本。
 
+## OTA 协议与实测性能
+
+GATT 服务 `0xFEE0` / 特征 `0xFEE1`（可写、可写无响应、可读）。
+
+| 命令 | 作用 | 响应 |
+|------|------|------|
+| `0x80` PROGRAM | 写入 Image B，**按 256 字节 Flash 页拆分多次写入** | 2 字节状态 |
+| `0x81` ERASE | 按 4 KB 块擦除 Image B | 2 字节状态 |
+| `0x82` VERIFY | 逐字节比对 Image B | 2 字节状态 |
+| `0x83` END | 切换 ImageFlag 并复位，IAP 开始拷贝 | — |
+| `0x84` INFO | 设备信息 | 20 字节，见下表 |
+| `0x85` CRC32 | 整片 Image B 的 CRC32（zlib 兼容） | `crc32_le[4] + 0x00 0x00` |
+
+`INFO` 响应（20 字节）：
+
+| 偏移 | 内容 |
+|------|------|
+| 0 | ImageFlag |
+| 1–4 | Image 区大小（216 KiB，LE） |
+| 5–6 | Flash 块大小（4096） |
+| 7–8 | Chip ID |
+| 9 | 能力位：bit0 = PROGRAM 按页拆分（≥1.2.9），bit1 = 支持 `0x85`（≥1.3.0） |
+| 10 | OTA 协议版本（1.3.x = 4） |
+| 11–12 | OTA 模式下 PA9 实测电压（mV，≥1.3.0） |
+
+**分片约束（踩过坑，别改）**
+
+- PROGRAM 单条写入不能跨 256 字节 Flash 页。固件从 1.2.9 起在设备内部拆分，
+  因此分片可以放大；但超过 128 字节会被 ESPHome 代理转成 prepare/execute 长写，
+  每片十几次往返，慢且容易断链（240 字节实测 12% 处失败）。
+- VERIFY 走同一套 ROM 页机制，分片**必须留在 64**，240 字节会卡死。
+
+**实测（1.3.0 → 1.3.1，CR2032 新电池）**
+
+| 项目 | 值 |
+|------|-----|
+| PROGRAM 分片 / VERIFY | 128 字节 / CRC32 一次往返 |
+| 上传速度 | 约 54 片/秒（≈6.9 KB/s） |
+| 总耗时 | 约 35~40 秒 |
+| OTA 负载电压 | 3.04 V（全程无下探） |
+
+设备进入 OTA 模式后：无连接 8 分钟、总时长 24 分钟自动复位退出；失败重试需重新
+长按 B 键 3 秒。
+
 ## 目录结构
 
 ```
@@ -68,15 +112,19 @@ python tools/publish_firmware.py --repo . --notes "改了什么" --push
 
 ```json
 {
-  "version": "1.2.5",
+  "version": "1.3.1",
   "file": "ch592_ota.bin",
-  "size": 155808,
-  "crc32": "0xA1D19F5F",
+  "size": 156048,
+  "crc32": "0x0FA7C0DC",
   "sha256": "…",
-  "built": "2026-11-15T11:02:56+00:00",
-  "notes": "1.2.5: …"
+  "built": "2026-11-15T13:58:00+00:00",
+  "notes": "1.3.1: 电池 OTA 实测版本"
 }
 ```
+
+`publish_firmware.py` 会交叉核对 `broadcaster.h` 里的 `FW_VERSION_STRING` 与
+`.bin.json` 的 `version`，不一致直接报错。发布后记得打 tag 并推送：GitHub Actions
+会为缺失的 `v*` tag 自动建 release，Gitee 需要手动建。
 
 ## HA 自动检查新固件
 
