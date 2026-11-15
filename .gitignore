@@ -1,0 +1,9 @@
+obj/
+.mrs/
+.settings/
+backup_*/
+dist/
+homeassistant/
+__pycache__/
+*.pyc
+*.zip

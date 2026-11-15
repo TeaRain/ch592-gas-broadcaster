@@ -1,0 +1,60 @@
+
+Discarded input sections
+
+ .text          0x0000000000000000        0x0 obj/jumpiap/startup_CH592.o
+ .data          0x0000000000000000        0x0 obj/jumpiap/startup_CH592.o
+ .bss           0x0000000000000000        0x0 obj/jumpiap/startup_CH592.o
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+FLASH            0x0000000000000000 0x0000000000001000 xr
+RAM              0x0000000020000000 0x0000000000006800 xrw
+*default*        0x0000000000000000 0xffffffffffffffff
+
+Linker script and memory map
+
+LOAD obj/jumpiap/startup_CH592.o
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/rv32imac/ilp32\libgcc.a
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/../../../../riscv-none-embed/lib/rv32imac/ilp32\libg_nano.a
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/../../../../riscv-none-embed/lib/rv32imac/ilp32\libc_nano.a
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/rv32imac/ilp32\libgcc.a
+START GROUP
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/rv32imac/ilp32\libgcc.a
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/../../../../riscv-none-embed/lib/rv32imac/ilp32\libc_nano.a
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/../../../../riscv-none-embed/lib/rv32imac/ilp32\libnosys.a
+END GROUP
+START GROUP
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/rv32imac/ilp32\libgcc.a
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/../../../../riscv-none-embed/lib/rv32imac/ilp32\libc_nano.a
+LOAD c:/users/zbridge/appdata/local/temp/claude-riscv-build/tools/wch-gcc8/riscv-none-embed-gcc-8-win-1.92/bin/../lib/gcc/riscv-none-embed/8.2.0/../../../../riscv-none-embed/lib/rv32imac/ilp32\libnosys.a
+END GROUP
+                [!provide]                        PROVIDE (__global_pointer$ = 0x20004800)
+
+.init           0x0000000000000000        0x4
+                0x0000000000000000                _sinit = .
+                0x0000000000000000                . = ALIGN (0x4)
+ *(SORT_NONE(.init))
+ .init          0x0000000000000000        0x4 obj/jumpiap/startup_CH592.o
+                0x0000000000000000                _start
+ *(.ImageFlag)
+ *(.ImageFlag.*)
+                0x0000000000000004                . = ALIGN (0x4)
+                0x0000000000000004                _einit = .
+OUTPUT(JumpIAP/jumpiap.elf elf32-littleriscv)
+
+.debug_line     0x0000000000000000       0x6f
+ .debug_line    0x0000000000000000       0x6f obj/jumpiap/startup_CH592.o
+
+.debug_info     0x0000000000000000       0x26
+ .debug_info    0x0000000000000000       0x26 obj/jumpiap/startup_CH592.o
+
+.debug_abbrev   0x0000000000000000       0x14
+ .debug_abbrev  0x0000000000000000       0x14 obj/jumpiap/startup_CH592.o
+
+.debug_aranges  0x0000000000000000       0x20
+ .debug_aranges
+                0x0000000000000000       0x20 obj/jumpiap/startup_CH592.o
+
+.debug_str      0x0000000000000000       0x72
+ .debug_str     0x0000000000000000       0x72 obj/jumpiap/startup_CH592.o

@@ -1,0 +1,9 @@
+{
+  "version": "1.2.5",
+  "file": "ch592_ota.bin",
+  "size": 155808,
+  "crc32": "0xA1D19F5F",
+  "sha256": "cdcfcdb9bec33045b4e36313b488353df66005a0cdcc0905e0bf7f3223e64059",
+  "built": "2026-11-15T11:03:17+00:00",
+  "notes": "1.2.5: 首个通过 Gitee 自动检查的固件版本"
+}
