@@ -47,6 +47,9 @@
 #define CMD_IAP_VERIFY         0x82               // IAP校验命令
 #define CMD_IAP_END            0x83               // IAP结束标志
 #define CMD_IAP_INFO           0x84               // IAP获取设备信息
+#define CMD_IAP_CRC32          0x85               // CRC32 of Image B
+#define CMD_IAP_SET_GAS        0x86               // set gas reading
+#define CMD_IAP_SET_THRESHOLD  0x87               // set pulse threshold
 
 /* 数据帧长度定义 */
 #define IAP_LEN                247

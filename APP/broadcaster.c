@@ -12,6 +12,11 @@
 #define GAS_FLASH_MAGIC           0x47415331UL  /* "GAS1" */
 #define GAS_FLASH_SLOT0           0
 #define GAS_FLASH_SLOT1           4096
+#define GAS_ADJUST_MAX_TOTAL      2000000UL /* max change per press: 2000 m3 */
+
+/* TCRT5000 pulse threshold, adjustable over the OTA channel (fw >= 1.4.1) */
+#define TCRT_CONFIG_MAGIC         0x54435231UL  /* "TCR1" */
+#define TCRT_CONFIG_ADDR          0x3000        /* DataFlash block 3 */
 
 typedef struct
 {
@@ -21,6 +26,14 @@ typedef struct
     uint32_t crc;          /* 低16位为CRC16 */
 } gas_record_t;
 
+typedef struct
+{
+    uint32_t magic;
+    uint16_t threshold;
+    uint16_t reserved;
+    uint32_t crc;          /* low 16 bits = CRC16 over the first 8 bytes */
+} tcrt_config_t;
+
 static uint8_t Broadcaster_TaskID;
 
 static uint8_t s_ucBroadcasterCnt = 0;    // 广播次数
@@ -29,7 +42,8 @@ static uint32_t s_u32GasMeter = 0;        // 燃气表数值，0.001立方米/bit
 static uint16_t s_u16FirstPowerOn = 200;  // 上电1分钟内不计量燃气
 static uint8_t s_bTcrt5000Use = FALSE;    // 是否已建立反射基准
 static uint16_t s_u16Tcrt5000Min = 4095;  // 反射差分最小值
-static uint16_t s_u16Tcrt5000 = 0;        // 反射差分值
+static uint16_t s_u16Tcrt5000 = 0;
+static uint16_t s_u16TcrtThreshold = TCRT5000_THRESHOLD_DEFAULT; /* runtime pulse threshold */
 static uint8_t s_bKeyPBlocked = FALSE;    // P键上电已拉低，释放前忽略
 static uint8_t s_bKeyNBlocked = FALSE;    // N键上电已拉低，释放前忽略
 
@@ -38,6 +52,7 @@ static uint16_t s_u16KeyBDownTime = 0;    // B键长按计时（OTA模式）
 
 static uint8_t s_bKeyBPressed = FALSE;    // B键上一次采样状态
 static uint8_t s_bAdjustActive = FALSE;   // P/N键正在调整
+static uint32_t s_u32AdjustTotal = 0;   /* delta applied in this press, 0.001 m3 */
 static volatile uint8_t s_u8KeyIrqMask = 0; // 按键下降沿中断标志
 
 static uint32_t s_u32FlashSeq = 0;        // 记录序号
@@ -219,6 +234,75 @@ void ReadFromDataFlash(void)
     s_u32LastSaved = s_u32GasMeter;
 }
 
+static uint8_t read_tcrt_config(tcrt_config_t *cfg)
+{
+    EEPROM_READ(TCRT_CONFIG_ADDR, (uint8_t *)cfg, sizeof(tcrt_config_t));
+
+    if(cfg->magic != TCRT_CONFIG_MAGIC)
+    {
+        return FALSE;
+    }
+    if(cfg->crc != (uint32_t)crc16_ccitt((const uint8_t *)cfg, 8))
+    {
+        return FALSE;
+    }
+    if((cfg->threshold < TCRT5000_THRESHOLD_MIN) ||
+       (cfg->threshold > TCRT5000_THRESHOLD_MAX))
+    {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* Load the stored pulse threshold (DataFlash block 3), fall back to default */
+void ReadConfigFromDataFlash(void)
+{
+    tcrt_config_t cfg;
+
+    if(read_tcrt_config(&cfg))
+    {
+        s_u16TcrtThreshold = cfg.threshold;
+    }
+    else
+    {
+        s_u16TcrtThreshold = TCRT5000_THRESHOLD_DEFAULT;
+    }
+}
+
+uint16_t Broadcaster_GetThreshold(void)
+{
+    return s_u16TcrtThreshold;
+}
+
+/* Persist a new pulse threshold and apply it immediately.
+   Returns 0 on success, 0xFE on out-of-range, 0xFF on verify failure. */
+uint8_t Broadcaster_SetThreshold(uint16_t value)
+{
+    tcrt_config_t cfg;
+    tcrt_config_t check;
+
+    if((value < TCRT5000_THRESHOLD_MIN) || (value > TCRT5000_THRESHOLD_MAX))
+    {
+        return 0xFE;
+    }
+
+    cfg.magic = TCRT_CONFIG_MAGIC;
+    cfg.threshold = value;
+    cfg.reserved = 0;
+    cfg.crc = (uint32_t)crc16_ccitt((const uint8_t *)&cfg, 8);
+
+    EEPROM_ERASE(TCRT_CONFIG_ADDR, EEPROM_BLOCK_SIZE);
+    EEPROM_WRITE(TCRT_CONFIG_ADDR, (uint8_t *)&cfg, sizeof(tcrt_config_t));
+
+    if(!read_tcrt_config(&check) || (check.threshold != value))
+    {
+        return 0xFF;
+    }
+    s_u16TcrtThreshold = value;
+    return 0;
+}
+
+
 // 电池电压采样
 void sample_battery_voltage()
 {
@@ -263,6 +347,12 @@ void sample_battery_voltage()
     {
         s_u16BatVolt = ((u16Adc2 * ADC_VREF) >> 9) - (3 * ADC_VREF);
     }
+}
+
+/* battery voltage in mV, for the OTA mode INFO response */
+uint16_t Broadcaster_GetBatteryMv(void)
+{
+    return s_u16BatVolt;
 }
 
 // TCRT5000采样：发射管关-开-关，差分抵消环境光
@@ -314,7 +404,7 @@ void sample_tcrt5000_voltage()
             s_bTcrt5000Use = TRUE;
         }
 
-        if(s_u16Tcrt5000 > (s_u16Tcrt5000Min + TCRT5000_THRESHOLD))
+        if(s_u16Tcrt5000 > (s_u16Tcrt5000Min + s_u16TcrtThreshold))
         {//检测到反射位置
             if(s_bTcrt5000Use == TRUE)
             {
@@ -438,10 +528,13 @@ static void process_keys(void)
         s_ucBroadcasterCnt = 5;
         s_u16KeyDownTime++;
 
-        if(s_u16KeyDownTime > 30)
-        {//超过9s停止累加，必须松开再按，防止按键卡住时无限增长
-            s_u16KeyDownTime = 30;
-            delta = 0;
+        if(s_u16KeyDownTime > 60)
+        {// long press 18s+: 100 m3 per 300ms
+            delta = 100000;
+        }
+        else if(s_u16KeyDownTime > 30)
+        {// long press 9s+: 10 m3 per 300ms (keeps going)
+            delta = 10000;
         }
         else if(s_u16KeyDownTime > 20)
         {//6s
@@ -456,6 +549,10 @@ static void process_keys(void)
             delta = 10;      //+0.01立方米
         }
 
+        if(delta && s_u32AdjustTotal >= GAS_ADJUST_MAX_TOTAL)
+        {// safety cap: release the key to keep adjusting
+            delta = 0;
+        }
         if(delta)
         {
             if(keyP)
@@ -477,11 +574,13 @@ static void process_keys(void)
                     s_u32GasMeter = 0;
                 }
             }
+            s_u32AdjustTotal += delta;
         }
     }
     else
     {
         s_u16KeyDownTime = 0;
+        s_u32AdjustTotal = 0;
         if(s_bAdjustActive)
         {
             s_bAdjustActive = FALSE;
@@ -513,6 +612,65 @@ static void process_keys(void)
             SaveToDataFlash();
         }
     }
+}
+
+/* Set the gas reading (0.001 m3) over the OTA channel.
+   The new record goes into the older slot with seq+1, so the previous
+   value survives a power loss until the write has been verified.
+   Returns 0 on success, 0xFE on bad value, 0xFF on verify failure. */
+uint8_t Broadcaster_SetGasMeter(uint32_t value)
+{
+    gas_record_t rec0;
+    gas_record_t rec1;
+    gas_record_t nrec;
+    gas_record_t check;
+    uint8_t ok0;
+    uint8_t ok1;
+    uint8_t slot;
+    uint32_t seq = 0;
+    uint32_t addr;
+
+    if(value >= GAS_METER_ROLLOVER)
+    {
+        return 0xFE;
+    }
+
+    ok0 = read_gas_record(GAS_FLASH_SLOT0, &rec0);
+    ok1 = read_gas_record(GAS_FLASH_SLOT1, &rec1);
+    if(ok0 && (rec0.seq >= seq)) seq = rec0.seq;
+    if(ok1 && (rec1.seq >= seq)) seq = rec1.seq;
+
+    if(!ok0)
+    {
+        slot = 0;
+    }
+    else if(!ok1)
+    {
+        slot = 1;
+    }
+    else
+    {
+        slot = (rec0.seq <= rec1.seq) ? 0 : 1;
+    }
+    addr = (slot == 0) ? GAS_FLASH_SLOT0 : GAS_FLASH_SLOT1;
+
+    nrec.magic = GAS_FLASH_MAGIC;
+    nrec.seq = seq + 1;
+    nrec.value = value;
+    nrec.crc = (uint32_t)crc16_ccitt((const uint8_t *)&nrec, 12);
+
+    EEPROM_ERASE(addr, EEPROM_BLOCK_SIZE);
+    EEPROM_WRITE(addr, (uint8_t *)&nrec, sizeof(gas_record_t));
+
+    if(!read_gas_record(addr, &check))
+    {
+        return 0xFF;
+    }
+    if((check.value != value) || (check.seq != nrec.seq))
+    {
+        return 0xFF;
+    }
+    return 0;
 }
 
 typedef struct
@@ -559,6 +717,8 @@ void Broadcaster_Init(void)
         __WFI();
     }
 #endif
+
+    ReadConfigFromDataFlash();
 
     Broadcaster_TaskID = TMOS_ProcessEventRegister(Broadcaster_ProcessEvent);
 

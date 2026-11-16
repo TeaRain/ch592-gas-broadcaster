@@ -20,6 +20,14 @@
 #include "OTA.h"
 #include "OTAprofile.h"
 
+/* defined in broadcaster.c */
+extern void sample_battery_voltage(void);
+extern uint16_t Broadcaster_GetBatteryMv(void);
+extern uint8_t Broadcaster_SetGasMeter(uint32_t value);
+extern uint16_t Broadcaster_GetThreshold(void);
+extern uint8_t Broadcaster_SetThreshold(uint16_t value);
+extern void ReadConfigFromDataFlash(void);
+
 /*********************************************************************
  * MACROS
  */
@@ -219,6 +227,10 @@ gapRolesParamUpdateCB_t PeripheralParamUpdate_t = NULL;
  */
 void Peripheral_Init()
 {
+    /* OTA mode never runs Broadcaster_Init, so load the stored  */
+    /* pulse threshold explicitly for the INFO response.        */
+    ReadConfigFromDataFlash();
+
     Peripheral_TaskID = TMOS_ProcessEventRegister(Peripheral_ProcessEvent);
 
     // Setup the GAP Peripheral Role Profile
@@ -387,6 +399,13 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         }
 
         return (events);
+    }
+
+    if(events & OTA_REBOOT_EVT)
+    {
+        DisableAllIRQ();
+        SYS_ResetExecute();
+        return (events ^ OTA_REBOOT_EVT);
     }
 
     // Discard unknown events
@@ -638,6 +657,26 @@ void DisableAllIRQ(void)
  *
  * @return  none
  */
+/* CRC32 (zlib compatible) over the whole Image B area: lets the host
+   verify the uploaded image with a single round trip. */
+static uint32_t OTA_Crc32Image(void)
+{
+    const uint8_t *p = (const uint8_t *)IMAGE_B_START_ADD;
+    uint32_t crc = 0xFFFFFFFFu;
+    uint32_t i;
+    uint8_t j;
+
+    for(i = 0; i < (uint32_t)IMAGE_SIZE; i++)
+    {
+        crc ^= p[i];
+        for(j = 0; j < 8; j++)
+        {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
 void Rec_OTA_IAP_DataDeal(void)
 {
     switch(iap_rec_data.other.buf[0])
@@ -658,7 +697,23 @@ void Rec_OTA_IAP_DataDeal(void)
             PRINT("IAP_PROM: %08x len:%d \r\n", (int)OpAdd, (int)OpParaDataLen);
 
             /* 当前是ImageA，直接编程 */
-            status = FLASH_ROM_WRITE(OpAdd, iap_rec_data.program.buf, (uint16_t)OpParaDataLen);
+            /* split at 256-byte page boundaries: one ROM write must never
+               cross a flash page, otherwise a large chunk corrupts data */
+            {
+                uint8_t *pData = iap_rec_data.program.buf;
+                uint16_t u16Left = (uint16_t)OpParaDataLen;
+                uint32_t u32Addr = OpAdd;
+                status = 0;
+                while(u16Left && (status == 0))
+                {
+                    uint16_t u16PageLeft = (uint16_t)(256 - (u32Addr & 0xFF));
+                    uint16_t u16Len = (u16Left < u16PageLeft) ? u16Left : u16PageLeft;
+                    status = FLASH_ROM_WRITE(u32Addr, pData, u16Len);
+                    u32Addr += u16Len;
+                    pData += u16Len;
+                    u16Left -= u16Len;
+                }
+            }
             if(status)             PRINT("IAP_PROM err \r\n");
             OTA_IAP_SendCMDDealSta(status);
             break;
@@ -757,6 +812,16 @@ void Rec_OTA_IAP_DataDeal(void)
 
             send_buf[7] = CHIP_ID&0xFF;
             send_buf[8] = (CHIP_ID>>8)&0xFF;
+            /* caps: bit0 = PROGRAM splits at 256-byte pages (fw >= 1.2.9) */
+            send_buf[9] = 0x0F; /* bit0 page split, bit1 CRC32, bit2 set-gas, bit3 set-threshold */
+            send_buf[10] = 6;   /* OTA protocol version */
+            GPIOA_ModeCfg(GPIO_Pin_9, GPIO_ModeIN_Floating);
+            sample_battery_voltage();
+            send_buf[11] = (uint8_t)(Broadcaster_GetBatteryMv() & 0xFF);
+            send_buf[12] = (uint8_t)((Broadcaster_GetBatteryMv() >> 8) & 0xFF);
+            /* current pulse threshold (fw >= 1.4.1) */
+            send_buf[13] = (uint8_t)(Broadcaster_GetThreshold() & 0xFF);
+            send_buf[14] = (uint8_t)((Broadcaster_GetThreshold() >> 8) & 0xFF);
             /* 有需要再增加 */
 
             /* 发送信息 */
@@ -765,6 +830,66 @@ void Rec_OTA_IAP_DataDeal(void)
             break;
         }
 
+        /* CRC32 over Image B */
+        case CMD_IAP_CRC32:
+        {
+            uint8_t send_buf[8];
+            uint32_t crc = OTA_Crc32Image();
+            send_buf[0] = (uint8_t)(crc & 0xFF);
+            send_buf[1] = (uint8_t)((crc >> 8) & 0xFF);
+            send_buf[2] = (uint8_t)((crc >> 16) & 0xFF);
+            send_buf[3] = (uint8_t)((crc >> 24) & 0xFF);
+            send_buf[4] = 0;
+            send_buf[5] = 0;
+            OTA_IAP_SendData(send_buf, 6);
+            break;
+        }
+        /* set the gas reading: [cmd,len,value_le32,magic_le16] */
+        case CMD_IAP_SET_GAS:
+        {
+            uint8_t *p = iap_rec_data.other.buf;
+            uint32_t value;
+            uint16_t magic;
+            uint8_t status;
+
+            value = (uint32_t)p[2] | ((uint32_t)p[3] << 8) |
+                    ((uint32_t)p[4] << 16) | ((uint32_t)p[5] << 24);
+            magic = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
+
+            if(magic != 0x5AA5)
+            {
+                OTA_IAP_SendCMDDealSta(0xFE);
+                break;
+            }
+            status = Broadcaster_SetGasMeter(value);
+            OTA_IAP_SendCMDDealSta(status);
+            if(status == 0)
+            {
+                /* reboot so the broadcaster reloads the new value */
+                tmos_start_task(Peripheral_TaskID, OTA_REBOOT_EVT, 300);
+            }
+            break;
+        }
+        /* set the pulse threshold: [cmd,len,threshold_le16,magic_le16] */
+        case CMD_IAP_SET_THRESHOLD:
+        {
+            uint8_t *p = iap_rec_data.other.buf;
+            uint16_t value;
+            uint16_t magic;
+            uint8_t status;
+
+            value = (uint16_t)p[2] | ((uint16_t)p[3] << 8);
+            magic = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
+
+            if(magic != 0x5AA5)
+            {
+                OTA_IAP_SendCMDDealSta(0xFE);
+                break;
+            }
+            status = Broadcaster_SetThreshold(value);
+            OTA_IAP_SendCMDDealSta(status);
+            break;
+        }
         default:
         {
             OTA_IAP_CMDErrDeal();
