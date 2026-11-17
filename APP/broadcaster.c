@@ -311,7 +311,6 @@ static void gas_save_internal(uint8_t force)
 {
     if(!force && s_u16SaveRetryDelay)
     {
-        s_u16SaveRetryDelay--;
         return;
     }
     if(gas_store_append(s_u32GasMeter) == 0)
@@ -564,6 +563,12 @@ void sample_tcrt5000_voltage()
             s_u16Tcrt5000Min++;
         }
 
+    }
+
+    /* the save backoff counts 300 ms samples, not save attempts */
+    if(s_u16SaveRetryDelay)
+    {
+        s_u16SaveRetryDelay--;
     }
 }
 
