@@ -27,6 +27,7 @@ extern uint8_t Broadcaster_SetGasMeter(uint32_t value);
 extern uint16_t Broadcaster_GetThreshold(void);
 extern uint8_t Broadcaster_SetThreshold(uint16_t value);
 extern void ReadConfigFromDataFlash(void);
+extern void ReadFromDataFlash(void);
 
 /*********************************************************************
  * MACROS
@@ -230,6 +231,7 @@ void Peripheral_Init()
     /* OTA mode never runs Broadcaster_Init, so load the stored  */
     /* pulse threshold explicitly for the INFO response.        */
     ReadConfigFromDataFlash();
+    ReadFromDataFlash();
 
     Peripheral_TaskID = TMOS_ProcessEventRegister(Peripheral_ProcessEvent);
 

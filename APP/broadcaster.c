@@ -14,6 +14,13 @@
 #define GAS_FLASH_SLOT1           4096
 #define GAS_ADJUST_MAX_TOTAL      2000000UL /* max change per press: 2000 m3 */
 
+/* Gas reading is an append-only log inside one 4 KB block:
+   256 records x 16 bytes. A block is erased only when it is full,
+   i.e. once per 256 saves instead of once per save. */
+#define GAS_LOG_SIZE              EEPROM_BLOCK_SIZE
+#define GAS_LOG_REC_SIZE          16
+#define GAS_LOG_FULL              GAS_LOG_SIZE
+
 /* TCRT5000 pulse threshold, adjustable over the OTA channel (fw >= 1.4.1) */
 #define TCRT_CONFIG_MAGIC         0x54435231UL  /* "TCR1" */
 #define TCRT_CONFIG_ADDR          0x3000        /* DataFlash block 3 */
@@ -55,9 +62,12 @@ static uint8_t s_bAdjustActive = FALSE;   // P/N键正在调整
 static uint32_t s_u32AdjustTotal = 0;   /* delta applied in this press, 0.001 m3 */
 static volatile uint8_t s_u8KeyIrqMask = 0; // 按键下降沿中断标志
 
-static uint32_t s_u32FlashSeq = 0;        // 记录序号
-static uint8_t s_u8FlashSlot = 1;         // 上一次写入的槽位
-static uint32_t s_u32LastSaved = 0;       // 上一次保存的燃气值
+static uint32_t s_u32FlashSeq = 0;        /* last accepted sequence */
+static uint8_t s_u8FlashBlock = 0;        /* active 4 KB log block */
+static uint16_t s_u16FlashOffset = 0;     /* next append offset */
+static uint16_t s_u16SaveRetryDelay = 0;  /* ticks to wait after a failed save */
+static uint8_t s_bGasStoreLoaded = FALSE; /* log state scanned at least once */
+static uint32_t s_u32LastSaved = 0;       /* value of the last accepted record */
 
 #define FW_VERSION_LEN (sizeof(FW_VERSION_STRING) - 1)
 static uint8_t bthomeData[19 + 2 + FW_VERSION_LEN] =
@@ -147,91 +157,217 @@ static uint8_t read_gas_record(uint32_t addr, gas_record_t *rec)
     return TRUE;
 }
 
-// 写入数据到DataFlash：双槽位交替写，带序号和CRC
-void SaveToDataFlash(void)
+/* ------------------------------------------------------------------
+   Gas reading store: append-only log
+   ------------------------------------------------------------------
+   Two 4 KB blocks are used, each split into 256 records of 16 bytes.
+   A save appends one record to the active block; nothing is erased until
+   the block is full. Then the *other* block (the previous generation) is
+   erased and becomes the active one, so a power loss can only ever lose
+   the single record that was being appended, never the whole log.
+   A record is accepted only after being read back and verified.
+   ------------------------------------------------------------------ */
+
+static uint32_t gas_block_addr(uint8_t block)
 {
-    gas_record_t rec;
-    uint8_t slot;
-    uint32_t addr;
-
-    slot = s_u8FlashSlot ^ 1;
-    addr = (slot == 0) ? GAS_FLASH_SLOT0 : GAS_FLASH_SLOT1;
-
-    rec.magic = GAS_FLASH_MAGIC;
-    rec.seq = ++s_u32FlashSeq;
-    rec.value = s_u32GasMeter;
-    rec.crc = (uint32_t)crc16_ccitt((const uint8_t *)&rec, 12);
-
-    EEPROM_ERASE(addr, EEPROM_BLOCK_SIZE);
-    EEPROM_WRITE(addr, (uint8_t *)&rec, sizeof(gas_record_t));
-
-    s_u8FlashSlot = slot;
-    s_u32LastSaved = s_u32GasMeter;
+    return (block == 0) ? GAS_FLASH_SLOT0 : GAS_FLASH_SLOT1;
 }
 
-// 从DataFlash读取数据
-void ReadFromDataFlash(void)
+static uint8_t gas_record_blank(uint32_t addr)
 {
-    gas_record_t rec0;
-    gas_record_t rec1;
-    uint8_t ok0;
-    uint8_t ok1;
-    uint32_t legacy;
+    uint8_t buf[GAS_LOG_REC_SIZE] __attribute__((aligned(4)));
+    uint8_t i;
 
-    ok0 = read_gas_record(GAS_FLASH_SLOT0, &rec0);
-    ok1 = read_gas_record(GAS_FLASH_SLOT1, &rec1);
-
-    if(ok0 && ok1)
+    EEPROM_READ(addr, buf, GAS_LOG_REC_SIZE);
+    for(i = 0; i < GAS_LOG_REC_SIZE; i++)
     {
-        if(rec0.seq >= rec1.seq)
+        if(buf[i] != 0xFF)
         {
-            s_u32GasMeter = rec0.value;
-            s_u32FlashSeq = rec0.seq;
-            s_u8FlashSlot = 0;
-        }
-        else
-        {
-            s_u32GasMeter = rec1.value;
-            s_u32FlashSeq = rec1.seq;
-            s_u8FlashSlot = 1;
+            return FALSE;
         }
     }
-    else if(ok0)
+    return TRUE;
+}
+
+/* first blank record at or after off; GAS_LOG_FULL when the block is full */
+static uint16_t gas_next_blank(uint8_t block, uint16_t off)
+{
+    uint32_t base = gas_block_addr(block);
+
+    while((uint32_t)off + GAS_LOG_REC_SIZE <= GAS_LOG_SIZE)
     {
-        s_u32GasMeter = rec0.value;
-        s_u32FlashSeq = rec0.seq;
-        s_u8FlashSlot = 0;
+        if(gas_record_blank(base + off))
+        {
+            return off;
+        }
+        off += GAS_LOG_REC_SIZE;
     }
-    else if(ok1)
+    return GAS_LOG_FULL;
+}
+
+/* scan both blocks, keep the record with the highest seq */
+static uint8_t gas_store_load(void)
+{
+    gas_record_t rec;
+    uint32_t seq = 0;
+    uint8_t have = FALSE;
+    uint8_t best_block = 0;
+    uint16_t best_off = 0;
+    uint8_t block;
+    uint16_t off;
+
+    for(block = 0; block < 2; block++)
     {
-        s_u32GasMeter = rec1.value;
-        s_u32FlashSeq = rec1.seq;
-        s_u8FlashSlot = 1;
+        uint32_t base = gas_block_addr(block);
+
+        for(off = 0; (uint32_t)off + GAS_LOG_REC_SIZE <= GAS_LOG_SIZE; off += GAS_LOG_REC_SIZE)
+        {
+            if(!read_gas_record(base + off, &rec))
+            {
+                continue;
+            }
+            if(!have || (rec.seq >= seq))
+            {
+                have = TRUE;
+                seq = rec.seq;
+                best_block = block;
+                best_off = off;
+                s_u32GasMeter = rec.value;
+            }
+        }
+    }
+
+    if(have)
+    {
+        s_u32FlashSeq = seq;
+        s_u8FlashBlock = best_block;
+        s_u16FlashOffset = gas_next_blank(best_block, best_off + GAS_LOG_REC_SIZE);
+        s_u32LastSaved = s_u32GasMeter;
+    }
+    return have;
+}
+
+/* move the log to the other block; the active log is never erased */
+static uint8_t gas_store_switch(void)
+{
+    uint8_t spare = s_u8FlashBlock ^ 1;
+    uint32_t addr = gas_block_addr(spare);
+
+    if(EEPROM_ERASE(addr, EEPROM_BLOCK_SIZE) != 0)
+    {
+        return FALSE;
+    }
+    s_u8FlashBlock = spare;
+    s_u16FlashOffset = 0;
+    return TRUE;
+}
+
+/* append one record, verify by read-back; 0 = ok, 0xFF = failed */
+static uint8_t gas_store_append(uint32_t value)
+{
+    gas_record_t rec;
+    gas_record_t check;
+    uint32_t addr;
+    uint16_t off;
+    uint8_t attempt;
+
+    for(attempt = 0; attempt < 3; attempt++)
+    {
+        off = gas_next_blank(s_u8FlashBlock, s_u16FlashOffset);
+        if(off >= GAS_LOG_FULL)
+        {
+            if(!gas_store_switch())
+            {
+                return 0xFF;
+            }
+            off = 0;
+        }
+
+        rec.magic = GAS_FLASH_MAGIC;
+        rec.seq = s_u32FlashSeq + 1;
+        rec.value = value;
+        rec.crc = (uint32_t)crc16_ccitt((const uint8_t *)&rec, 12);
+
+        addr = gas_block_addr(s_u8FlashBlock) + off;
+        if(EEPROM_WRITE(addr, (uint8_t *)&rec, GAS_LOG_REC_SIZE) != 0)
+        {
+            s_u16FlashOffset = off + GAS_LOG_REC_SIZE;
+            continue;
+        }
+        if(read_gas_record(addr, &check) &&
+           (check.seq == rec.seq) && (check.value == value))
+        {
+            s_u32FlashSeq = rec.seq;
+            s_u16FlashOffset = off + GAS_LOG_REC_SIZE;
+            s_u32LastSaved = value;
+            return 0;
+        }
+        s_u16FlashOffset = off + GAS_LOG_REC_SIZE;
+    }
+    return 0xFF;
+}
+
+static void gas_save_internal(uint8_t force)
+{
+    if(!force && s_u16SaveRetryDelay)
+    {
+        s_u16SaveRetryDelay--;
+        return;
+    }
+    if(gas_store_append(s_u32GasMeter) == 0)
+    {
+        s_u16SaveRetryDelay = 0;
     }
     else
     {
-        // 兼容旧固件：旧固件在地址0保存裸uint32
-        legacy = 0xFFFFFFFFUL;
-        EEPROM_READ(GAS_FLASH_SLOT0, (uint8_t *)&legacy, sizeof(legacy));
-        if(legacy < GAS_METER_ROLLOVER)
+        /* retry in ~15 s instead of hitting the flash every 300 ms */
+        s_u16SaveRetryDelay = 50;
+    }
+}
+
+void SaveToDataFlash(void)
+{
+    gas_save_internal(FALSE);
+}
+
+/* user-initiated save (key press): ignore the retry backoff */
+void SaveToDataFlashNow(void)
+{
+    gas_save_internal(TRUE);
+}
+
+void ReadFromDataFlash(void)
+{
+    uint32_t legacy;
+
+    s_u32GasMeter = DEFAULT_GAS_METER;
+    s_u32FlashSeq = 0;
+    s_u8FlashBlock = 0;
+    s_u16FlashOffset = gas_next_blank(0, 0);
+    s_u32LastSaved = s_u32GasMeter;
+
+    if(gas_store_load())
+    {
+        if(s_u32GasMeter >= GAS_METER_ROLLOVER)
         {
-            s_u32GasMeter = legacy;
-            s_u32FlashSeq = 0;
-            s_u8FlashSlot = 0;   // 写槽1，保留槽0旧值直到新记录写完
-            s_u32LastSaved = s_u32GasMeter;
-            SaveToDataFlash();
-            return;
+            s_u32GasMeter = 0;
         }
-        s_u32GasMeter = DEFAULT_GAS_METER;
-        s_u32FlashSeq = 0;
-        s_u8FlashSlot = 1;
+        s_u32LastSaved = s_u32GasMeter;
+        s_bGasStoreLoaded = TRUE;
+        return;
     }
 
-    if(s_u32GasMeter >= GAS_METER_ROLLOVER)
+    /* data from a firmware without the log layout: bare uint32 at block 0 */
+    legacy = 0xFFFFFFFFUL;
+    EEPROM_READ(GAS_FLASH_SLOT0, (uint8_t *)&legacy, 4);
+    if(legacy < GAS_METER_ROLLOVER)
     {
-        s_u32GasMeter = 0;
+        s_u32GasMeter = legacy;
+        s_u32LastSaved = legacy;
+        s_u16FlashOffset = gas_next_blank(0, 0);
+        gas_store_append(legacy);
     }
-    s_u32LastSaved = s_u32GasMeter;
+    s_bGasStoreLoaded = TRUE;
 }
 
 static uint8_t read_tcrt_config(tcrt_config_t *cfg)
@@ -517,7 +653,7 @@ static void process_keys(void)
     // B键：按下沿保存一次；若在两次采样之间短按，也保存一次
     if((keyB && !s_bKeyBPressed) || (!keyB && (irq & KEY_IRQ_B)))
     {
-        SaveToDataFlash();
+        SaveToDataFlashNow();
     }
     s_bKeyBPressed = keyB;
 
@@ -584,7 +720,7 @@ static void process_keys(void)
         if(s_bAdjustActive)
         {
             s_bAdjustActive = FALSE;
-            SaveToDataFlash();   // 长按松手保存一次
+            SaveToDataFlashNow();   // 长按松手保存一次
         }
         else if(irq & (KEY_IRQ_P | KEY_IRQ_N))
         {
@@ -609,64 +745,26 @@ static void process_keys(void)
                 }
             }
             s_ucBroadcasterCnt = 5;
-            SaveToDataFlash();
+            SaveToDataFlashNow();
         }
     }
 }
 
 /* Set the gas reading (0.001 m3) over the OTA channel.
-   The new record goes into the older slot with seq+1, so the previous
-   value survives a power loss until the write has been verified.
+   The record is appended to the log and read back for verification,
+   so a power loss can only lose the record being written.
    Returns 0 on success, 0xFE on bad value, 0xFF on verify failure. */
 uint8_t Broadcaster_SetGasMeter(uint32_t value)
 {
-    gas_record_t rec0;
-    gas_record_t rec1;
-    gas_record_t nrec;
-    gas_record_t check;
-    uint8_t ok0;
-    uint8_t ok1;
-    uint8_t slot;
-    uint32_t seq = 0;
-    uint32_t addr;
-
     if(value >= GAS_METER_ROLLOVER)
     {
         return 0xFE;
     }
-
-    ok0 = read_gas_record(GAS_FLASH_SLOT0, &rec0);
-    ok1 = read_gas_record(GAS_FLASH_SLOT1, &rec1);
-    if(ok0 && (rec0.seq >= seq)) seq = rec0.seq;
-    if(ok1 && (rec1.seq >= seq)) seq = rec1.seq;
-
-    if(!ok0)
+    if(!s_bGasStoreLoaded)
     {
-        slot = 0;
+        ReadFromDataFlash();
     }
-    else if(!ok1)
-    {
-        slot = 1;
-    }
-    else
-    {
-        slot = (rec0.seq <= rec1.seq) ? 0 : 1;
-    }
-    addr = (slot == 0) ? GAS_FLASH_SLOT0 : GAS_FLASH_SLOT1;
-
-    nrec.magic = GAS_FLASH_MAGIC;
-    nrec.seq = seq + 1;
-    nrec.value = value;
-    nrec.crc = (uint32_t)crc16_ccitt((const uint8_t *)&nrec, 12);
-
-    EEPROM_ERASE(addr, EEPROM_BLOCK_SIZE);
-    EEPROM_WRITE(addr, (uint8_t *)&nrec, sizeof(gas_record_t));
-
-    if(!read_gas_record(addr, &check))
-    {
-        return 0xFF;
-    }
-    if((check.value != value) || (check.seq != nrec.seq))
+    if(gas_store_append(value) != 0)
     {
         return 0xFF;
     }
@@ -710,8 +808,9 @@ void Broadcaster_Init(void)
     EEPROM_ERASE(GAS_FLASH_SLOT1, EEPROM_BLOCK_SIZE);
     s_u32GasMeter = (uint32_t)GAS_RECOVERY_VALUE;
     s_u32FlashSeq = 0;
-    s_u8FlashSlot = 1;
-    SaveToDataFlash();
+    s_u8FlashBlock = 0;
+    s_u16FlashOffset = 0;
+    SaveToDataFlashNow();
     while(1)
     {
         __WFI();
