@@ -25,3 +25,11 @@ jobs:
             git commit -m "release: CH592 gas broadcaster 1.4.7" -m "Co-Authored-By: Claude Code <noreply@anthropic.com>"
             git push origin master
           fi
+      - name: Create the v1.4.7 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view v1.4.7 >/dev/null 2>&1; then
+            gh release create v1.4.7 --target master --title "CH592 Gas Broadcaster 1.4.7" --generate-notes
+          fi
