@@ -34,7 +34,7 @@ static inline uint16_t ThresholdKeyHold(ThresholdKeyState *state)
 static inline int16_t ThresholdKeyRelease(ThresholdKeyState *state)
 {
     int16_t delta = 0;
-    if(state->active && state->down_ticks < 10)
+    if(state->active && state->down_ticks == 0)
     {
         delta = (state->direction == THRESHOLD_KEY_P) ? 1 : -1;
     }

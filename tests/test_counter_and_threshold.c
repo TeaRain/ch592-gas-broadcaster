@@ -16,7 +16,8 @@ int main(void)
     CHECK(GasCounterDelta(0, UINT32_MAX) == 1);
 
     CHECK(ThresholdStepForHold(0) == 0);
-    CHECK(ThresholdStepForHold(9) == 0);
+    CHECK(ThresholdStepForHold(1) == 1);
+    CHECK(ThresholdStepForHold(9) == 1);
     CHECK(ThresholdStepForHold(10) == 10);
     CHECK(ThresholdStepForHold(29) == 10);
     CHECK(ThresholdStepForHold(30) == 50);
@@ -30,16 +31,24 @@ int main(void)
         ThresholdKeyState state = {0};
         int i;
         ThresholdKeyStart(&state, THRESHOLD_KEY_P);
-        CHECK(ThresholdKeyHold(&state) == 0);
         CHECK(ThresholdKeyRelease(&state) == 1);
         CHECK(state.active == 0);
 
         ThresholdKeyStart(&state, THRESHOLD_KEY_N);
-        CHECK(ThresholdKeyHold(&state) == 0);
         CHECK(ThresholdKeyRelease(&state) == -1);
 
         ThresholdKeyStart(&state, THRESHOLD_KEY_P);
-        for (i = 0; i < 10; i++) (void)ThresholdKeyHold(&state);
+        CHECK(ThresholdKeyHold(&state) == 1);
+        CHECK(ThresholdKeyRelease(&state) == 0);
+        CHECK(state.active == 0);
+
+        ThresholdKeyStart(&state, THRESHOLD_KEY_N);
+        CHECK(ThresholdKeyHold(&state) == 1);
+        CHECK(ThresholdKeyRelease(&state) == 0);
+
+        ThresholdKeyStart(&state, THRESHOLD_KEY_N);
+        for (i = 0; i < 9; i++) CHECK(ThresholdKeyHold(&state) == 1);
+        CHECK(ThresholdKeyHold(&state) == 10);
         CHECK(ThresholdKeyRelease(&state) == 0);
     }
 
