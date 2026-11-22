@@ -22,14 +22,17 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if ! git diff --cached --quiet; then
-            git commit -m "release: CH592 gas broadcaster 1.4.7" -m "Co-Authored-By: Claude Code <noreply@anthropic.com>"
+            version=$(jq -er '.version' firmware/manifest.json)
+            git commit -m "release: CH592 gas broadcaster ${version}" -m "Co-Authored-By: Kimi Code <noreply@moonshot.cn>"
             git push origin master
           fi
-      - name: Create the v1.4.7 release
+      - name: Release the firmware manifest version
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if ! gh release view v1.4.7 >/dev/null 2>&1; then
-            gh release create v1.4.7 --target master --title "CH592 Gas Broadcaster 1.4.7" --generate-notes
+          version=$(jq -er '.version' firmware/manifest.json)
+          tag="v${version}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target master --title "CH592 Gas Broadcaster ${version}" --generate-notes
           fi
