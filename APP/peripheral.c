@@ -19,6 +19,7 @@
 #include "Peripheral.h"
 #include "OTA.h"
 #include "ota_validation.h"
+#include "ota_crc32.h"
 #include "scheduled_ota.h"
 #include "OTAprofile.h"
 
@@ -666,24 +667,11 @@ void DisableAllIRQ(void)
  *
  * @return  none
  */
-/* CRC32 (zlib compatible) over the whole Image B area: lets the host
-   verify the uploaded image with a single round trip. */
+/* Fast zlib-compatible CRC32 over Image B. The table-driven helper avoids
+   blocking the BLE task with the old eight-iteration-per-byte loop. */
 static uint32_t OTA_Crc32Image(void)
 {
-    const uint8_t *p = (const uint8_t *)IMAGE_B_START_ADD;
-    uint32_t crc = 0xFFFFFFFFu;
-    uint32_t i;
-    uint8_t j;
-
-    for(i = 0; i < (uint32_t)IMAGE_SIZE; i++)
-    {
-        crc ^= p[i];
-        for(j = 0; j < 8; j++)
-        {
-            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
-        }
-    }
-    return ~crc;
+    return OtaCrc32((const uint8_t *)IMAGE_B_START_ADD, (uint32_t)IMAGE_SIZE);
 }
 
 void Rec_OTA_IAP_DataDeal(void)
@@ -830,7 +818,7 @@ void Rec_OTA_IAP_DataDeal(void)
             send_buf[8] = (CHIP_ID>>8)&0xFF;
             /* caps: bit0 = PROGRAM splits at 256-byte pages (fw >= 1.2.9) */
             send_buf[9] = 0x0D; /* bit0 page split, bit1 CRC32, bit2 reserved, bit3 set-threshold */
-            send_buf[10] = 7;   /* OTA protocol version */
+            send_buf[10] = 8;   /* OTA protocol version: fast table-driven CRC32 */
             GPIOA_ModeCfg(GPIO_Pin_9, GPIO_ModeIN_Floating);
             sample_battery_voltage();
             send_buf[11] = (uint8_t)(Broadcaster_GetBatteryMv() & 0xFF);
