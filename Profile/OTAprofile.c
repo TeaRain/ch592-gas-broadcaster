@@ -270,6 +270,17 @@ static bStatus_t OTAProfile_WriteAttrCB(uint16_t connHandle, gattAttribute_t *pA
         {
             case OTAPROFILE_CHAR_UUID:
             {
+                if(offset != 0)
+                {
+                    OTAProfileWriteLen = 0;
+                    return ATT_ERR_INVALID_OFFSET;
+                }
+                if((len == 0) || (len > IAP_LEN))
+                {
+                    OTAProfileWriteLen = 0;
+                    return ATT_ERR_INVALID_VALUE_SIZE;
+                }
+
                 //Write the value
                 if(status == SUCCESS)
                 {

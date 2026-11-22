@@ -39,14 +39,12 @@ extern "C" {
 #define ADC_VREF                     1050     // 1.05V
 #define DEFAULT_GAS_METER            0        // 初始燃气值
 
-#define GAS_METER_ROLLOVER           100000000UL              // 燃气表满量程归零值(0.001立方米)
-#define GAS_METER_MAX_VALUE          (GAS_METER_ROLLOVER - 1) // 99999.999立方米
 #define GAS_METER_SAVE_STEP          100                      // 每变化0.1立方米自动保存
 #define TCRT5000_THRESHOLD_DEFAULT   100      // default pulse threshold (adjustable over OTA)
 #define TCRT5000_THRESHOLD_MIN       20       // lowest threshold the OTA command accepts
 #define TCRT5000_THRESHOLD_MAX       2000     // highest threshold the OTA command accepts
 #define TCRT5000_MIN_THRESHOLD       50       // 采样最小值更新阈值
-#define FW_VERSION_STRING            "1.4.3"  // BTHome text object 0x53
+#define FW_VERSION_STRING            "1.4.7"  // BTHome text object 0x53
 #define OTA_MODE_FLASH_ADDR          0x2000   // DataFlash block for OTA-mode request
 #define OTA_MODE_MAGIC               0xA5
 
@@ -65,8 +63,9 @@ extern void Broadcaster_Init(void);
 extern uint8_t OtaMode_IsRequested(void);
 extern void OtaMode_ClearRequest(void);
 extern void OtaMode_Request(void);
+extern void OtaMode_RequestScheduled(void);
+extern uint8_t OtaMode_IsScheduledRequest(void);
 /* write the gas reading from the OTA channel (0.001 m3), 0 = ok */
-extern uint8_t Broadcaster_SetGasMeter(uint32_t value);
 /* runtime pulse threshold, stored in DataFlash block 3 */
 extern uint16_t Broadcaster_GetThreshold(void);
 extern uint8_t Broadcaster_SetThreshold(uint16_t value);

@@ -114,9 +114,15 @@ def main() -> int:
     full.update(jump)
     full.update(app)
     full.update(iap)
-    write_ihex(full, Path(args.full_hex))
 
     app_lo, app_hi = range_of(app)
+    if app_lo != APP_START:
+        raise SystemExit(
+            f"App must start at 0x{APP_START:05X}, got 0x{app_lo:05X}; "
+            "refusing to shift the OTA image"
+        )
+    write_ihex(full, Path(args.full_hex))
+
     bin_bytes = bytes(app.get(app_lo + i, 0xFF) for i in range(app_hi - app_lo + 1))
     app_bin = Path(args.app_bin)
     app_bin.write_bytes(bin_bytes)

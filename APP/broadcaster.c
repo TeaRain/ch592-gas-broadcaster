@@ -1,6 +1,11 @@
 #include "CONFIG.h"
 #include "devinfoservice.h"
 #include "broadcaster.h"
+#include "gas_log_policy.h"
+#include "scheduled_ota.h"
+#include "gas_counter_policy.h"
+#include "threshold_policy.h"
+#include "threshold_key_policy.h"
 
 /* 按键中断标志 */
 #define KEY_IRQ_B                 0x01
@@ -43,6 +48,7 @@ typedef struct
 
 static uint8_t Broadcaster_TaskID;
 
+static uint32_t s_u32ScheduledOtaMinutes = 0;
 static uint8_t s_ucBroadcasterCnt = 0;    // 广播次数
 static uint16_t s_u16BatVolt = 0;         // 电池采样电压
 static uint32_t s_u32GasMeter = 0;        // 燃气表数值，0.001立方米/bit
@@ -54,15 +60,14 @@ static uint16_t s_u16TcrtThreshold = TCRT5000_THRESHOLD_DEFAULT; /* runtime puls
 static uint8_t s_bKeyPBlocked = FALSE;    // P键上电已拉低，释放前忽略
 static uint8_t s_bKeyNBlocked = FALSE;    // N键上电已拉低，释放前忽略
 
-static uint16_t s_u16KeyDownTime = 0;     // 按键按下时间
 static uint16_t s_u16KeyBDownTime = 0;    // B键长按计时（OTA模式）
 
 static uint8_t s_bKeyBPressed = FALSE;    // B键上一次采样状态
-static uint8_t s_bAdjustActive = FALSE;   // P/N键正在调整
-static uint32_t s_u32AdjustTotal = 0;   /* delta applied in this press, 0.001 m3 */
+static ThresholdKeyState s_thresholdKey;   // P/N键正在调整
 static volatile uint8_t s_u8KeyIrqMask = 0; // 按键下降沿中断标志
 
-static uint32_t s_u32FlashSeq = 0;        /* last accepted sequence */
+static uint32_t s_u32FlashSeq = 0;
+static uint8_t s_bFlashSeqDirty = FALSE;        /* last accepted sequence */
 static uint8_t s_u8FlashBlock = 0;        /* active 4 KB log block */
 static uint16_t s_u16FlashOffset = 0;     /* next append offset */
 static uint16_t s_u16SaveRetryDelay = 0;  /* ticks to wait after a failed save */
@@ -130,11 +135,7 @@ static uint16_t crc16_ccitt(const uint8_t *data, uint16_t len)
 // 计算两个燃气值之间的增量，支持满量程回零
 static uint32_t gas_delta(uint32_t now, uint32_t saved)
 {
-    if(now >= saved)
-    {
-        return now - saved;
-    }
-    return (GAS_METER_ROLLOVER - saved) + now;
+    return GasCounterDelta(now, saved);
 }
 
 // 读取并校验一个槽位
@@ -147,10 +148,6 @@ static uint8_t read_gas_record(uint32_t addr, gas_record_t *rec)
         return FALSE;
     }
     if(rec->crc != (uint32_t)crc16_ccitt((const uint8_t *)rec, 12))
-    {
-        return FALSE;
-    }
-    if(rec->value >= GAS_METER_ROLLOVER)
     {
         return FALSE;
     }
@@ -171,6 +168,28 @@ static uint8_t read_gas_record(uint32_t addr, gas_record_t *rec)
 static uint32_t gas_block_addr(uint8_t block)
 {
     return (block == 0) ? GAS_FLASH_SLOT0 : GAS_FLASH_SLOT1;
+}
+
+static int gas_log_read_sequence(uint8_t block, uint16_t index, uint32_t *sequence, void *context)
+{
+    gas_record_t rec;
+    (void)context;
+    if(!read_gas_record(gas_block_addr(block) + ((uint32_t)index * GAS_LOG_REC_SIZE), &rec))
+    {
+        return 0;
+    }
+    *sequence = rec.seq;
+    return 1;
+}
+
+static void gas_store_recover_sequence(void)
+{
+    if(!s_bFlashSeqDirty)
+    {
+        return;
+    }
+    s_u32FlashSeq = GasLogRecoverMaxSequence(s_u32FlashSeq, gas_log_read_sequence, 0);
+    s_bFlashSeqDirty = FALSE;
 }
 
 static uint8_t gas_record_blank(uint32_t addr)
@@ -273,6 +292,7 @@ static uint8_t gas_store_append(uint32_t value)
 
     for(attempt = 0; attempt < 3; attempt++)
     {
+        gas_store_recover_sequence();
         off = gas_next_blank(s_u8FlashBlock, s_u16FlashOffset);
         if(off >= GAS_LOG_FULL)
         {
@@ -291,6 +311,7 @@ static uint8_t gas_store_append(uint32_t value)
         addr = gas_block_addr(s_u8FlashBlock) + off;
         if(EEPROM_WRITE(addr, (uint8_t *)&rec, GAS_LOG_REC_SIZE) != 0)
         {
+            s_bFlashSeqDirty = TRUE;
             s_u16FlashOffset = off + GAS_LOG_REC_SIZE;
             continue;
         }
@@ -302,6 +323,7 @@ static uint8_t gas_store_append(uint32_t value)
             s_u32LastSaved = value;
             return 0;
         }
+        s_bFlashSeqDirty = TRUE;
         s_u16FlashOffset = off + GAS_LOG_REC_SIZE;
     }
     return 0xFF;
@@ -341,16 +363,13 @@ void ReadFromDataFlash(void)
 
     s_u32GasMeter = DEFAULT_GAS_METER;
     s_u32FlashSeq = 0;
+    s_bFlashSeqDirty = FALSE;
     s_u8FlashBlock = 0;
     s_u16FlashOffset = gas_next_blank(0, 0);
     s_u32LastSaved = s_u32GasMeter;
 
     if(gas_store_load())
     {
-        if(s_u32GasMeter >= GAS_METER_ROLLOVER)
-        {
-            s_u32GasMeter = 0;
-        }
         s_u32LastSaved = s_u32GasMeter;
         s_bGasStoreLoaded = TRUE;
         return;
@@ -359,7 +378,7 @@ void ReadFromDataFlash(void)
     /* data from a firmware without the log layout: bare uint32 at block 0 */
     legacy = 0xFFFFFFFFUL;
     EEPROM_READ(GAS_FLASH_SLOT0, (uint8_t *)&legacy, 4);
-    if(legacy < GAS_METER_ROLLOVER)
+    if(legacy != 0xFFFFFFFFUL)
     {
         s_u32GasMeter = legacy;
         s_u32LastSaved = legacy;
@@ -544,12 +563,7 @@ void sample_tcrt5000_voltage()
             if(s_bTcrt5000Use == TRUE)
             {
                 s_u32GasMeter += 10;
-                if(s_u32GasMeter >= GAS_METER_ROLLOVER)
-                {
-                    s_u32GasMeter -= GAS_METER_ROLLOVER;
-                }
-                if(!s_bAdjustActive &&
-                   (gas_delta(s_u32GasMeter, s_u32LastSaved) >= GAS_METER_SAVE_STEP))
+                if(gas_delta(s_u32GasMeter, s_u32LastSaved) >= GAS_METER_SAVE_STEP)
                 {
                     SaveToDataFlash();
                 }
@@ -593,13 +607,29 @@ void gaprole_advert_enable(uint8_t mode)
 }
 
 // 按键处理：下降沿中断用于捕获短按，300ms任务处理长按
+static void adjust_threshold(int32_t delta)
+{
+    int32_t value = (int32_t)s_u16TcrtThreshold + delta;
+    if(value < 0) value = 0;
+    s_u16TcrtThreshold = ThresholdClamp((uint32_t)value, TCRT5000_THRESHOLD_MIN, TCRT5000_THRESHOLD_MAX);
+}
+
+static void save_threshold_now(void)
+{
+    if(Broadcaster_SetThreshold(s_u16TcrtThreshold) != 0)
+    {
+        ReadConfigFromDataFlash();
+    }
+}
+
 static void process_keys(void)
 {
     uint8_t irq;
     uint8_t keyB;
     uint8_t keyP;
     uint8_t keyN;
-    uint32_t delta;
+    uint16_t step;
+    int16_t short_delta;
 
     PFIC_DisableIRQ(GPIO_B_IRQn);
     irq = s_u8KeyIrqMask;
@@ -610,7 +640,7 @@ static void process_keys(void)
     keyP = (GPIOB_ReadPortPin(GPIO_Pin_11) == 0) ? TRUE : FALSE;
     keyN = (GPIOB_ReadPortPin(GPIO_Pin_10) == 0) ? TRUE : FALSE;
 
-    // PB10/PB11 同时为低通常是 USB 主机把 D-/D+ 下拉，不是真的按了 P/N
+    /* P+N low is the existing USB state, never a threshold adjustment. */
     if(keyP && keyN)
     {
         keyP = FALSE;
@@ -620,7 +650,6 @@ static void process_keys(void)
         irq &= ~(KEY_IRQ_P | KEY_IRQ_N);
     }
 
-    // 上电时已为低的按键，必须释放一次后才响应
     if(s_bKeyPBlocked)
     {
         irq &= ~KEY_IRQ_P;
@@ -640,7 +669,7 @@ static void process_keys(void)
         }
     }
 
-    // B键长按3秒进入OTA模式（10次 * 300ms）
+    /* B remains the manual OTA entry and also flushes the raw counter log. */
     if(keyB)
     {
         s_u16KeyBDownTime++;
@@ -654,126 +683,39 @@ static void process_keys(void)
     {
         s_u16KeyBDownTime = 0;
     }
-
-    // B键：按下沿保存一次；若在两次采样之间短按，也保存一次
     if((keyB && !s_bKeyBPressed) || (!keyB && (irq & KEY_IRQ_B)))
     {
         SaveToDataFlashNow();
     }
     s_bKeyBPressed = keyB;
 
-    // P/N键
     if(keyP || keyN)
     {
-        s_bAdjustActive = TRUE;
-        s_ucBroadcasterCnt = 5;
-        s_u16KeyDownTime++;
-
-        if(s_u16KeyDownTime > 60)
-        {// long press 18s+: 100 m3 per 300ms
-            delta = 100000;
-        }
-        else if(s_u16KeyDownTime > 30)
-        {// long press 9s+: 10 m3 per 300ms (keeps going)
-            delta = 10000;
-        }
-        else if(s_u16KeyDownTime > 20)
-        {//6s
-            delta = 1000;    //+1立方米
-        }
-        else if(s_u16KeyDownTime > 10)
-        {//3s
-            delta = 100;     //+0.1立方米
-        }
-        else
+        ThresholdKeyStart(&s_thresholdKey, keyP ? THRESHOLD_KEY_P : THRESHOLD_KEY_N);
+        step = ThresholdKeyHold(&s_thresholdKey);
+        if(step)
         {
-            delta = 10;      //+0.01立方米
-        }
-
-        if(delta && s_u32AdjustTotal >= GAS_ADJUST_MAX_TOTAL)
-        {// safety cap: release the key to keep adjusting
-            delta = 0;
-        }
-        if(delta)
-        {
-            if(keyP)
-            {
-                s_u32GasMeter += delta;
-                if(s_u32GasMeter >= GAS_METER_ROLLOVER)
-                {
-                    s_u32GasMeter -= GAS_METER_ROLLOVER;
-                }
-            }
-            else
-            {
-                if(s_u32GasMeter > delta)
-                {
-                    s_u32GasMeter -= delta;
-                }
-                else
-                {
-                    s_u32GasMeter = 0;
-                }
-            }
-            s_u32AdjustTotal += delta;
+            adjust_threshold(keyP ? (int32_t)step : -(int32_t)step);
         }
     }
     else
     {
-        s_u16KeyDownTime = 0;
-        s_u32AdjustTotal = 0;
-        if(s_bAdjustActive)
+        if(s_thresholdKey.active)
         {
-            s_bAdjustActive = FALSE;
-            SaveToDataFlashNow();   // 长按松手保存一次
+            short_delta = ThresholdKeyRelease(&s_thresholdKey);
+            if(short_delta)
+            {
+                adjust_threshold(short_delta);
+            }
+            save_threshold_now();
         }
         else if(irq & (KEY_IRQ_P | KEY_IRQ_N))
         {
-            // 两次采样之间的短按：+/-0.01立方米
-            if(irq & KEY_IRQ_P)
-            {
-                s_u32GasMeter += 10;
-                if(s_u32GasMeter >= GAS_METER_ROLLOVER)
-                {
-                    s_u32GasMeter -= GAS_METER_ROLLOVER;
-                }
-            }
-            if(irq & KEY_IRQ_N)
-            {
-                if(s_u32GasMeter > 10)
-                {
-                    s_u32GasMeter -= 10;
-                }
-                else
-                {
-                    s_u32GasMeter = 0;
-                }
-            }
-            s_ucBroadcasterCnt = 5;
-            SaveToDataFlashNow();
+            if(irq & KEY_IRQ_P) adjust_threshold(1);
+            if(irq & KEY_IRQ_N) adjust_threshold(-1);
+            save_threshold_now();
         }
     }
-}
-
-/* Set the gas reading (0.001 m3) over the OTA channel.
-   The record is appended to the log and read back for verification,
-   so a power loss can only lose the record being written.
-   Returns 0 on success, 0xFE on bad value, 0xFF on verify failure. */
-uint8_t Broadcaster_SetGasMeter(uint32_t value)
-{
-    if(value >= GAS_METER_ROLLOVER)
-    {
-        return 0xFE;
-    }
-    if(!s_bGasStoreLoaded)
-    {
-        ReadFromDataFlash();
-    }
-    if(gas_store_append(value) != 0)
-    {
-        return 0xFF;
-    }
-    return 0;
 }
 
 typedef struct
@@ -794,15 +736,33 @@ void OtaMode_ClearRequest(void)
     EEPROM_ERASE(OTA_MODE_FLASH_ADDR, EEPROM_BLOCK_SIZE);
 }
 
-void OtaMode_Request(void)
+uint8_t OtaMode_IsScheduledRequest(void)
+{
+    ota_mode_record_t rec;
+    EEPROM_READ(OTA_MODE_FLASH_ADDR, (uint8_t *)&rec, sizeof(rec));
+    return (rec.magic == OTA_MODE_MAGIC) &&
+           OtaRequestReasonIsScheduled(rec.reserved[0]);
+}
+
+static void OtaMode_WriteRequest(uint8_t reason)
 {
     ota_mode_record_t rec;
     rec.magic = OTA_MODE_MAGIC;
-    rec.reserved[0] = 0;
+    rec.reserved[0] = reason;
     rec.reserved[1] = 0;
     rec.reserved[2] = 0;
     EEPROM_ERASE(OTA_MODE_FLASH_ADDR, EEPROM_BLOCK_SIZE);
     EEPROM_WRITE(OTA_MODE_FLASH_ADDR, (uint8_t *)&rec, sizeof(rec));
+}
+
+void OtaMode_Request(void)
+{
+    OtaMode_WriteRequest(OTA_REQUEST_MANUAL);
+}
+
+void OtaMode_RequestScheduled(void)
+{
+    OtaMode_WriteRequest(OTA_REQUEST_SCHEDULED);
 }
 
 void Broadcaster_Init(void)
@@ -926,6 +886,13 @@ uint16_t Broadcaster_ProcessEvent(uint8_t task_id, uint16_t events)
     if(events & SBP_BROADCASTER_EVT)
     {
         tmos_start_task(Broadcaster_TaskID, SBP_BROADCASTER_EVT, SBP_BROADCASTER_EVT_PERIOD);
+        s_u32ScheduledOtaMinutes++;
+        if(ScheduledOta_ShouldRequest(s_u32ScheduledOtaMinutes))
+        {
+            s_u32ScheduledOtaMinutes = 0;
+            OtaMode_RequestScheduled();
+            SYS_ResetExecute();
+        }
         sample_battery_voltage();
         s_ucBroadcasterCnt = 1;
         return (events ^ SBP_BROADCASTER_EVT);

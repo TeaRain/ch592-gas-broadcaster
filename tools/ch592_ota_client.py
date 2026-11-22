@@ -70,6 +70,8 @@ async def upload(client: BleakClient, image: bytes, chunk: int, verify: bool) ->
     )
     if image_size != IMAGE_SIZE:
         raise RuntimeError(f"unexpected image size {image_size}, expected {IMAGE_SIZE}")
+    if block_size == 0:
+        raise RuntimeError("invalid block size 0 reported by device")
 
     blocks = (image_size + block_size - 1) // block_size
     addr16 = IMAGE_A_START >> 4

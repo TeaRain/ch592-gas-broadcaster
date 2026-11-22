@@ -121,10 +121,12 @@ def main() -> int:
         ["git", "-C", str(repo), "add", "firmware"],
         check=True,
     )
-    subprocess.run(
+    committed = subprocess.run(
         ["git", "-C", str(repo), "commit", "-m", f"firmware: {version}"],
-        check=False,  # nothing to commit is fine
+        check=False,  # report failures through fail() below
     )
+    if committed.returncode != 0:
+        fail(f"git commit 失败（退出码 {committed.returncode}）")
     for remote in remotes:
         names = subprocess.run(
             ["git", "-C", str(repo), "remote"],
@@ -135,10 +137,12 @@ def main() -> int:
         if remote not in names:
             print(f"skip remote {remote} (not configured)")
             continue
-        subprocess.run(
+        pushed = subprocess.run(
             ["git", "-C", str(repo), "push", remote, "HEAD"],
             check=False,
         )
+        if pushed.returncode != 0:
+            fail(f"git push {remote} 失败（退出码 {pushed.returncode}）")
     return 0
 
 

@@ -18,12 +18,13 @@
 #include "GATTprofile.h"
 #include "Peripheral.h"
 #include "OTA.h"
+#include "ota_validation.h"
+#include "scheduled_ota.h"
 #include "OTAprofile.h"
 
 /* defined in broadcaster.c */
 extern void sample_battery_voltage(void);
 extern uint16_t Broadcaster_GetBatteryMv(void);
-extern uint8_t Broadcaster_SetGasMeter(uint32_t value);
 extern uint16_t Broadcaster_GetThreshold(void);
 extern uint8_t Broadcaster_SetThreshold(uint16_t value);
 extern void ReadConfigFromDataFlash(void);
@@ -97,6 +98,7 @@ static uint8_t Peripheral_TaskID = 0xff; // Task ID for internal task/event proc
 static uint8_t  s_bOtaConnected = FALSE;
 static uint16_t s_u16OtaIdleTicks = 0;
 static uint16_t s_u16OtaTotalTicks = 0;
+static uint16_t s_u16OtaIdleLimit = OTA_MANUAL_IDLE_TICKS;
 
 // GAP - SCAN RSP data (max size = 31 bytes)
 static uint8_t scanRspData[31] = {
@@ -515,6 +517,11 @@ static void peripheralStateNotificationCB(gapRole_States_t newState, gapRoleEven
  *
  * @return  none
  */
+void Peripheral_SetScheduledOta(uint8_t reason)
+{
+    s_u16OtaIdleLimit = OtaIdleLimitTicks(reason);
+}
+
 static void performPeriodicTask(void)
 {
     // OTA模式超时：无连接5分钟退出；总时长15分钟强制退出
@@ -525,7 +532,7 @@ static void performPeriodicTask(void)
     else
     {
         s_u16OtaIdleTicks++;
-        if(s_u16OtaIdleTicks > 480)
+        if(s_u16OtaIdleTicks > s_u16OtaIdleLimit)
         {
             SYS_ResetExecute();
         }
@@ -705,7 +712,7 @@ void Rec_OTA_IAP_DataDeal(void)
                 uint8_t *pData = iap_rec_data.program.buf;
                 uint16_t u16Left = (uint16_t)OpParaDataLen;
                 uint32_t u32Addr = OpAdd;
-                status = 0;
+                status = OTA_ImageRangeValid(u32Addr, u16Left) ? 0 : 0xFF;
                 while(u16Left && (status == 0))
                 {
                     uint16_t u16PageLeft = (uint16_t)(256 - (u32Addr & 0xFF));
@@ -739,7 +746,7 @@ void Rec_OTA_IAP_DataDeal(void)
 
             PRINT("IAP_ERASE start:%08x num:%d\r\n", (int)OpAdd, (int)EraseBlockNum);
 
-            if(EraseAdd < IMAGE_B_START_ADD || (EraseAdd + (EraseBlockNum - 1) * FLASH_BLOCK_SIZE) > IMAGE_IAP_START_ADD)
+            if(!OTA_EraseRangeValid(EraseAdd, EraseBlockNum))
             {
                 OTA_IAP_SendCMDDealSta(0xFF);
             }
@@ -766,7 +773,14 @@ void Rec_OTA_IAP_DataDeal(void)
             PRINT("IAP_VERIFY: %08x len:%d \r\n", (int)OpAdd, (int)OpParaDataLen);
 
             /* 当前是ImageA，直接读取ImageB校验 */
-            status = FLASH_ROM_VERIFY(OpAdd, iap_rec_data.verify.buf, OpParaDataLen);
+            if(!OTA_ImageRangeValid(OpAdd, OpParaDataLen))
+            {
+                status = 0xFF;
+            }
+            else
+            {
+                status = FLASH_ROM_VERIFY(OpAdd, iap_rec_data.verify.buf, OpParaDataLen);
+            }
             if(status)
             {
                 PRINT("IAP_VERIFY err \r\n");
@@ -795,7 +809,7 @@ void Rec_OTA_IAP_DataDeal(void)
         }
         case CMD_IAP_INFO:
         {
-            uint8_t send_buf[20];
+            uint8_t send_buf[20] = {0};
 
             PRINT("IAP_INFO \r\n");
 
@@ -815,8 +829,8 @@ void Rec_OTA_IAP_DataDeal(void)
             send_buf[7] = CHIP_ID&0xFF;
             send_buf[8] = (CHIP_ID>>8)&0xFF;
             /* caps: bit0 = PROGRAM splits at 256-byte pages (fw >= 1.2.9) */
-            send_buf[9] = 0x0F; /* bit0 page split, bit1 CRC32, bit2 set-gas, bit3 set-threshold */
-            send_buf[10] = 6;   /* OTA protocol version */
+            send_buf[9] = 0x0D; /* bit0 page split, bit1 CRC32, bit2 reserved, bit3 set-threshold */
+            send_buf[10] = 7;   /* OTA protocol version */
             GPIOA_ModeCfg(GPIO_Pin_9, GPIO_ModeIN_Floating);
             sample_battery_voltage();
             send_buf[11] = (uint8_t)(Broadcaster_GetBatteryMv() & 0xFF);
@@ -846,44 +860,15 @@ void Rec_OTA_IAP_DataDeal(void)
             OTA_IAP_SendData(send_buf, 6);
             break;
         }
-        /* set the gas reading: [cmd,len,value_le32,magic_le16] */
-        case CMD_IAP_SET_GAS:
-        {
-            uint8_t *p = iap_rec_data.other.buf;
-            uint32_t value;
-            uint16_t magic;
-            uint8_t status;
-
-            value = (uint32_t)p[2] | ((uint32_t)p[3] << 8) |
-                    ((uint32_t)p[4] << 16) | ((uint32_t)p[5] << 24);
-            magic = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
-
-            if(magic != 0x5AA5)
-            {
-                OTA_IAP_SendCMDDealSta(0xFE);
-                break;
-            }
-            status = Broadcaster_SetGasMeter(value);
-            OTA_IAP_SendCMDDealSta(status);
-            if(status == 0)
-            {
-                /* reboot so the broadcaster reloads the new value */
-                tmos_start_task(Peripheral_TaskID, OTA_REBOOT_EVT, 300);
-            }
-            break;
-        }
         /* set the pulse threshold: [cmd,len,threshold_le16,magic_le16] */
         case CMD_IAP_SET_THRESHOLD:
         {
             uint8_t *p = iap_rec_data.other.buf;
             uint16_t value;
-            uint16_t magic;
             uint8_t status;
 
             value = (uint16_t)p[2] | ((uint16_t)p[3] << 8);
-            magic = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
-
-            if(magic != 0x5AA5)
+            if(!OTA_ThresholdMagicValid(p, 6))
             {
                 OTA_IAP_SendCMDDealSta(0xFE);
                 break;
@@ -929,6 +914,12 @@ void OTA_IAPWriteData(unsigned char index, unsigned char *p_data, unsigned char 
 {
     unsigned char  rec_len;
     unsigned char *rec_data;
+
+    if((w_len == 0) || !OTA_CommandFrameValid(p_data[0], w_len, (w_len > 1) ? p_data[1] : 0))
+    {
+        OTA_IAP_CMDErrDeal();
+        return;
+    }
 
     rec_len = w_len;
     rec_data = p_data;

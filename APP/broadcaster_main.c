@@ -16,6 +16,7 @@
 #include "HAL.h"
 #include "broadcaster.h"
 #include "peripheral.h"
+#include "scheduled_ota.h"
 
 /*********************************************************************
  * GLOBAL TYPEDEFS
@@ -72,6 +73,7 @@ int main(void)
     if(OtaMode_IsRequested())
     {
         // 长按B键后进入OTA模式：可连接外设 + OTA服务
+        Peripheral_SetScheduledOta(OtaMode_IsScheduledRequest() ? OTA_REQUEST_SCHEDULED : OTA_REQUEST_MANUAL);
         OtaMode_ClearRequest();
         GAPRole_PeripheralInit();
         Peripheral_Init();

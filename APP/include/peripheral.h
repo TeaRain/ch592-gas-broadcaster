@@ -29,6 +29,7 @@ extern "C" {
 #define SBP_START_DEVICE_EVT    0x0001
 #define SBP_PERIODIC_EVT        0x0002
 #define OTA_FLASH_ERASE_EVT     0x0004  //OTA Flash²Á³ýÈÎÎñ
+#define OTA_REBOOT_EVT          0x0008  //delay reset after command
 
 /*********************************************************************
  * MACROS
@@ -42,6 +43,7 @@ extern "C" {
  * Task Initialization for the BLE Application
  */
 extern void Peripheral_Init(void);
+extern void Peripheral_SetScheduledOta(uint8_t reason);
 
 /*
  * Task Event Processor for the BLE Application

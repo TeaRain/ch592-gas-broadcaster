@@ -54,6 +54,44 @@ void SwitchImageFlag(uint8_t new_flag)
     EEPROM_WRITE(OTA_DATAFLASH_ADD, (uint32_t *)&block_buf[0], 4);
 }
 
+uint8_t IAP_CopyBackupImage(void)
+{
+    __attribute__((aligned(8))) uint8_t flash_data[1024];
+    __attribute__((aligned(8))) uint8_t check_a[256];
+    __attribute__((aligned(8))) uint8_t check_b[256];
+    uint32_t offset;
+    uint16_t i;
+    uint8_t block;
+
+    if(FLASH_ROM_ERASE(IMAGE_A_START_ADD, IMAGE_A_SIZE) != 0)
+    {
+        return 0;
+    }
+
+    for(block = 0; block < IMAGE_A_SIZE / 1024; block++)
+    {
+        FLASH_ROM_READ(IMAGE_B_START_ADD + ((uint32_t)block * 1024), flash_data, 1024);
+        if(FLASH_ROM_WRITE(IMAGE_A_START_ADD + ((uint32_t)block * 1024), flash_data, 1024) != 0)
+        {
+            return 0;
+        }
+    }
+
+    for(offset = 0; offset < IMAGE_A_SIZE; offset += 256)
+    {
+        FLASH_ROM_READ(IMAGE_A_START_ADD + offset, check_a, 256);
+        FLASH_ROM_READ(IMAGE_B_START_ADD + offset, check_b, 256);
+        for(i = 0; i < 256; i++)
+        {
+            if(check_a[i] != check_b[i])
+            {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 /*********************************************************************
  * @fn      jump_APP
  *
@@ -71,14 +109,11 @@ void jump_APP(void)
         FLASH_ROM_READ(IMAGE_B_START_ADD + IMAGE_A_SIZE - 16, &first_word, 4);
         if(first_word == OTA_IMAGE_MAGIC)
         {
-            __attribute__((aligned(8))) uint8_t flash_Data[1024];
-            uint8_t i;
-
-            FLASH_ROM_ERASE(IMAGE_A_START_ADD, IMAGE_A_SIZE);
-            for(i = 0; i < IMAGE_A_SIZE / 1024; i++)
+            if(!IAP_CopyBackupImage())
             {
-                FLASH_ROM_READ(IMAGE_B_START_ADD + (i * 1024), flash_Data, 1024);
-                FLASH_ROM_WRITE(IMAGE_A_START_ADD + (i * 1024), flash_Data, 1024);
+                /* Keep IMAGE_IAP_FLAG and Image B so the next boot retries. */
+                SYS_ResetExecute();
+                return;
             }
             SwitchImageFlag(IMAGE_A_FLAG);
             /* 拷贝完成后擦除备份区 */
