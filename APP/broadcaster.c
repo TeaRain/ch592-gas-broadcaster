@@ -6,6 +6,7 @@
 #include "gas_counter_policy.h"
 #include "threshold_policy.h"
 #include "threshold_key_policy.h"
+#include "bthome_threshold.h"
 
 /* 按键中断标志 */
 #define KEY_IRQ_B                 0x01
@@ -75,13 +76,14 @@ static uint8_t s_bGasStoreLoaded = FALSE; /* log state scanned at least once */
 static uint32_t s_u32LastSaved = 0;       /* value of the last accepted record */
 
 #define FW_VERSION_LEN (sizeof(FW_VERSION_STRING) - 1)
-static uint8_t bthomeData[19 + 2 + FW_VERSION_LEN] =
+static uint8_t bthomeData[BthomeAdvertSize(FW_VERSION_LEN)] =
 {
     0x02, 0x01, 0x06,             // Flags data
     0x0F, 0x16, 0xD2, 0xFC, 0x40, // 服务数据bthomev2
     0x0C, 0x00, 0x00,             // 电池电压，0.001V/bit
     0x3D, 0x00, 0x00,             // ADC反射差分，1CNT/bit
-    0x4C, 0x00, 0x00, 0x00, 0x00  // 燃气表读数，0.001立方米/bit
+    0x4C, 0x00, 0x00, 0x00, 0x00, // 燃气表读数，0.001立方米/bit
+    0x3E, 0x00, 0x00, 0x00, 0x00  // threshold feedback (BTHome count32)
 };
 
 static void Broadcaster_StateNotificationCB(gapRole_States_t newState);
@@ -597,6 +599,7 @@ void updata_bthome_data()
     bthomeData[16] = (s_u32GasMeter >> 8) & 0xFF;
     bthomeData[17] = (s_u32GasMeter >> 16) & 0xFF;
     bthomeData[18] = (s_u32GasMeter >> 24) & 0xFF;
+    BthomeWriteThreshold(bthomeData, s_u16TcrtThreshold);
 }
 
 // 开启/关闭广播
@@ -612,6 +615,7 @@ static void adjust_threshold(int32_t delta)
     int32_t value = (int32_t)s_u16TcrtThreshold + delta;
     if(value < 0) value = 0;
     s_u16TcrtThreshold = ThresholdClamp((uint32_t)value, TCRT5000_THRESHOLD_MIN, TCRT5000_THRESHOLD_MAX);
+    s_ucBroadcasterCnt = 1;  // immediate P/N feedback on the next 300 ms sample
 }
 
 static void save_threshold_now(void)
@@ -620,6 +624,7 @@ static void save_threshold_now(void)
     {
         ReadConfigFromDataFlash();
     }
+    s_ucBroadcasterCnt = 1;  // advertise the final persisted/reverted value
 }
 
 static void process_keys(void)
@@ -787,10 +792,10 @@ void Broadcaster_Init(void)
     Broadcaster_TaskID = TMOS_ProcessEventRegister(Broadcaster_ProcessEvent);
 
     // BTHome v2 文本对象 0x53：固件版本号
-    bthomeData[3] = (uint8_t)(15 + 2 + FW_VERSION_LEN);
-    bthomeData[19] = 0x53;
-    bthomeData[20] = (uint8_t)FW_VERSION_LEN;
-    tmos_memcpy(&bthomeData[21], FW_VERSION_STRING, FW_VERSION_LEN);
+    bthomeData[3] = BthomeAdvertDataLength(FW_VERSION_LEN);
+    bthomeData[BTHOME_VERSION_OFFSET] = 0x53;
+    bthomeData[BTHOME_VERSION_OFFSET + 1] = (uint8_t)FW_VERSION_LEN;
+    tmos_memcpy(&bthomeData[BTHOME_VERSION_OFFSET + 2], FW_VERSION_STRING, FW_VERSION_LEN);
 
     uint8_t adv_type = GAP_ADTYPE_ADV_NONCONN_IND;
     GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, 1, &adv_type);

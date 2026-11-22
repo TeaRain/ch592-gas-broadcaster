@@ -1,9 +1,9 @@
 {
-  "version": "1.4.8",
+  "version": "1.4.9",
   "file": "ch592_ota.bin",
-  "size": 157476,
-  "crc32": "0x21728275",
-  "sha256": "8c567561b9b68af29744528a2639ec0b404be57bdfd14b9774bc8c6bc8e117f9",
-  "built": "2026-11-22T12:11:54+00:00",
-  "notes": "1.4.8: 协议8查找表快速CRC32，旧协议保留安全VERIFY"
+  "size": 157500,
+  "crc32": "0x342E9C2D",
+  "sha256": "bbff11179b3bfe3fe81291944f43e5575712d56bc21f7fcd3bff52f1214b8018",
+  "built": "2026-11-22T13:23:18+00:00",
+  "notes": "1.4.9: P/N阈值BTHome 0x3E实时回显，300ms补发"
 }
