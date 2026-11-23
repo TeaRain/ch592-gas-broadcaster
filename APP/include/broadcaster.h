@@ -13,6 +13,8 @@
 #ifndef BROADCASTER_H
 #define BROADCASTER_H
 
+#include "remote_ota_policy.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,8 +34,8 @@ extern "C" {
 
 #define SBP_GAS_METER_EVT_PERIOD      480     // 300ms
 #define SBP_BROADCASTER_EVT_PERIOD    96000   // 1分钟  
-#define SBP_ADVERT_INTERVAL           32      // 20ms广播间隔
-#define SBP_ADVERT_DISABLE_EVT_PERIOD 160     // 100ms广播窗口
+#define SBP_ADVERT_INTERVAL           REMOTE_OTA_ADV_INTERVAL_TICKS  // 50 ms
+#define SBP_ADVERT_DISABLE_EVT_PERIOD REMOTE_OTA_ADV_WINDOW_TICKS     // 300 ms
 #define SBP_ADVERT_DISABLE_EVT_TIME   1       // 广播窗口倍数
 
 #define ADC_VREF                     1050     // 1.05V
@@ -44,7 +46,7 @@ extern "C" {
 #define TCRT5000_THRESHOLD_MIN       20       // lowest threshold the OTA command accepts
 #define TCRT5000_THRESHOLD_MAX       2000     // highest threshold the OTA command accepts
 #define TCRT5000_MIN_THRESHOLD       50       // 采样最小值更新阈值
-#define FW_VERSION_STRING            "1.5.0"  // BTHome text object 0x53
+#define FW_VERSION_STRING            "1.6.0"  // BTHome text object 0x53
 #define OTA_MODE_FLASH_ADDR          0x2000   // DataFlash block for OTA-mode request
 #define OTA_MODE_MAGIC               0xA5
 

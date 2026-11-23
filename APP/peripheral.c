@@ -20,6 +20,7 @@
 #include "OTA.h"
 #include "ota_validation.h"
 #include "ota_crc32.h"
+#include "remote_ota_policy.h"
 #include "scheduled_ota.h"
 #include "OTAprofile.h"
 
@@ -30,6 +31,7 @@ extern uint16_t Broadcaster_GetThreshold(void);
 extern uint8_t Broadcaster_SetThreshold(uint16_t value);
 extern void ReadConfigFromDataFlash(void);
 extern void ReadFromDataFlash(void);
+extern void OtaMode_Request(void);
 
 /*********************************************************************
  * MACROS
@@ -100,6 +102,8 @@ static uint8_t  s_bOtaConnected = FALSE;
 static uint16_t s_u16OtaIdleTicks = 0;
 static uint16_t s_u16OtaTotalTicks = 0;
 static uint16_t s_u16OtaIdleLimit = OTA_MANUAL_IDLE_TICKS;
+static uint8_t s_bNormalMode = FALSE;
+static RemoteOtaControlState s_remoteOta;
 
 // GAP - SCAN RSP data (max size = 31 bytes)
 static uint8_t scanRspData[31] = {
@@ -143,6 +147,7 @@ static uint8_t advertData[] = {
 
 // GAP GATT Attributes
 static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "GasMeter OTA";
+static uint8_t attNormalDeviceName[GAP_DEVICE_NAME_LEN] = "GasMeter";
 
 // OTA IAP VARIABLES
 /* OTAÍ¨Ñ¶µÄÖ¡ */
@@ -231,6 +236,7 @@ gapRolesParamUpdateCB_t PeripheralParamUpdate_t = NULL;
  */
 void Peripheral_Init()
 {
+    s_bNormalMode = FALSE;
     /* OTA mode never runs Broadcaster_Init, so load the stored  */
     /* pulse threshold explicitly for the INFO response.        */
     ReadConfigFromDataFlash();
@@ -318,6 +324,29 @@ void Peripheral_Init()
     tmos_set_event(Peripheral_TaskID, SBP_START_DEVICE_EVT);
 }
 
+void Peripheral_InitNormal(void)
+{
+    uint8_t initial_advertising_enable = FALSE;
+    uint8_t adv_type = GAP_ADTYPE_ADV_IND;
+
+    s_bNormalMode = TRUE;
+    RemoteOtaControlInit(&s_remoteOta);
+    Peripheral_TaskID = TMOS_ProcessEventRegister(Peripheral_ProcessEvent);
+
+    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &initial_advertising_enable);
+    GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &adv_type);
+    /* Nothing extra to scan for: the BTHome advertising packet is sufficient. */
+    GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, 0, scanRspData);
+
+    GGS_AddService(GATT_ALL_SERVICES);
+    GATTServApp_AddService(GATT_ALL_SERVICES);
+    OTAProfile_AddService(GATT_ALL_SERVICES);
+    GGS_SetParameter(GGS_DEVICE_NAME_ATT, GAP_DEVICE_NAME_LEN, attNormalDeviceName);
+    OTAProfile_RegisterAppCBs(&Peripheral_OTA_IAPProfileCBs);
+
+    tmos_set_event(Peripheral_TaskID, SBP_START_DEVICE_EVT);
+}
+
 void PeripheralParamUpdate(uint16_t connInterval, uint16_t connSlaveLatency, uint16_t connTimeout)
 {
     PRINT("update %d %d %d \n", connInterval, connSlaveLatency, connTimeout);
@@ -361,8 +390,11 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
     {
         // Start the Device
         GAPRole_PeripheralStartDevice(Peripheral_TaskID, &Peripheral_BondMgrCBs, &Peripheral_PeripheralCBs);
-        // Set timer for first periodic event
-        tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT, SBP_PERIODIC_EVT_PERIOD);
+        // OTA mode alone owns the idle/total reset timers.
+        if(!s_bNormalMode)
+        {
+            tmos_start_task(Peripheral_TaskID, SBP_PERIODIC_EVT, SBP_PERIODIC_EVT_PERIOD);
+        }
         return (events ^ SBP_START_DEVICE_EVT);
     }
 
@@ -376,6 +408,25 @@ uint16_t Peripheral_ProcessEvent(uint8_t task_id, uint16_t events)
         // Perform periodic application task
         performPeriodicTask();
         return (events ^ SBP_PERIODIC_EVT);
+    }
+
+    if(events & OTA_REMOTE_RESET_EVT)
+    {
+        if(s_bNormalMode && s_remoteOta.reset_pending)
+        {
+            SYS_ResetExecute();
+        }
+        return (events ^ OTA_REMOTE_RESET_EVT);
+    }
+
+    if(events & OTA_REMOTE_TIMEOUT_EVT)
+    {
+        if(s_bNormalMode && RemoteOtaControlShouldDisconnect(&s_remoteOta) &&
+           s_remoteOta.connection_handle != INVALID_CONNHANDLE)
+        {
+            GAPRole_TerminateLink(s_remoteOta.connection_handle);
+        }
+        return (events ^ OTA_REMOTE_TIMEOUT_EVT);
     }
 
     //OTA_FLASH_ERASE_EVT
@@ -444,6 +495,18 @@ static void Peripheral_ProcessTMOSMsg(tmos_event_hdr_t *pMsg)
  *
  * @return  none
  */
+static void Peripheral_NormalConnected(gapEstLinkReqEvent_t *event)
+{
+    if(!s_bNormalMode || event == NULL)
+    {
+        return;
+    }
+    RemoteOtaControlSetConnection(&s_remoteOta, event->connectionHandle);
+    tmos_stop_task(Peripheral_TaskID, OTA_REMOTE_TIMEOUT_EVT);
+    tmos_start_task(Peripheral_TaskID, OTA_REMOTE_TIMEOUT_EVT,
+                    REMOTE_OTA_CONTROL_TIMEOUT_TICKS);
+}
+
 static void peripheralStateNotificationCB(gapRole_States_t newState, gapRoleEvent_t *pEvent)
 {
     switch(newState)
@@ -463,6 +526,7 @@ static void peripheralStateNotificationCB(gapRole_States_t newState, gapRoleEven
             gapEstLinkReqEvent_t *event = (gapEstLinkReqEvent_t *)pEvent;
             uint16_t              conn_interval = 0;
 
+            Peripheral_NormalConnected(event);
             conn_interval = event->connInterval;
             PRINT("Connected.. \n");
 
@@ -481,6 +545,7 @@ static void peripheralStateNotificationCB(gapRole_States_t newState, gapRoleEven
         case GAPROLE_CONNECTED_ADV:
             s_bOtaConnected = TRUE;
             s_u16OtaIdleTicks = 0;
+            Peripheral_NormalConnected((gapEstLinkReqEvent_t *)pEvent);
             PRINT("Connected Advertising..\n");
             break;
         case GAPROLE_WAITING:
@@ -489,8 +554,20 @@ static void peripheralStateNotificationCB(gapRole_States_t newState, gapRoleEven
             s_u16OtaIdleTicks = 0;
             uint8_t initial_advertising_enable = TRUE;
 
-            // Set the GAP Role Parameters
-            GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &initial_advertising_enable);
+            if(s_bNormalMode)
+            {
+                RemoteOtaControlSetConnected(&s_remoteOta, FALSE);
+                tmos_stop_task(Peripheral_TaskID, OTA_REMOTE_TIMEOUT_EVT);
+                if(!s_remoteOta.reset_pending)
+                {
+                    uint8_t disable_advertising = FALSE;
+                    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &disable_advertising);
+                }
+            }
+            else
+            {
+                GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &initial_advertising_enable);
+            }
             PRINT("Disconnected..\n");
         }
         break;
@@ -521,6 +598,12 @@ static void peripheralStateNotificationCB(gapRole_States_t newState, gapRoleEven
 void Peripheral_SetScheduledOta(uint8_t reason)
 {
     s_u16OtaIdleLimit = OtaIdleLimitTicks(reason);
+}
+
+uint8_t Peripheral_NormalLinkActive(void)
+{
+    return s_bNormalMode &&
+           (s_remoteOta.connected || s_remoteOta.reset_pending);
 }
 
 static void performPeriodicTask(void)
@@ -902,6 +985,25 @@ void OTA_IAPWriteData(unsigned char index, unsigned char *p_data, unsigned char 
 {
     unsigned char  rec_len;
     unsigned char *rec_data;
+
+    if(s_bNormalMode)
+    {
+        if(!OTA_RemoteEnterFrameValid(p_data, w_len))
+        {
+            OTA_IAP_CMDErrDeal();
+            return;
+        }
+
+        OTA_IAP_SendCMDDealSta(0);
+        if(RemoteOtaControlRequestReset(&s_remoteOta))
+        {
+            OtaMode_Request();
+            tmos_stop_task(Peripheral_TaskID, OTA_REMOTE_TIMEOUT_EVT);
+            tmos_start_task(Peripheral_TaskID, OTA_REMOTE_RESET_EVT,
+                            REMOTE_OTA_RESET_DELAY_TICKS);
+        }
+        return;
+    }
 
     if((w_len == 0) || !OTA_CommandFrameValid(p_data[0], w_len, (w_len > 1) ? p_data[1] : 0))
     {

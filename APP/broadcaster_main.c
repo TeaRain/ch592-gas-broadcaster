@@ -80,7 +80,8 @@ int main(void)
     }
     else
     {
-        GAPRole_BroadcasterInit();
+        GAPRole_PeripheralInit();
+        Peripheral_InitNormal();
         Broadcaster_Init();
     }
     Main_Circulation();

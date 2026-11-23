@@ -1,6 +1,7 @@
 #include "CONFIG.h"
 #include "devinfoservice.h"
 #include "broadcaster.h"
+#include "peripheral.h"
 #include "gas_log_policy.h"
 #include "scheduled_ota.h"
 #include "gas_counter_policy.h"
@@ -85,9 +86,6 @@ static uint8_t bthomeData[BthomeAdvertSize(FW_VERSION_LEN)] =
     0x4C, 0x00, 0x00, 0x00, 0x00, // 燃气表读数，0.001立方米/bit
     0x3E, 0x00, 0x00, 0x00, 0x00  // threshold feedback (BTHome count32)
 };
-
-static void Broadcaster_StateNotificationCB(gapRole_States_t newState);
-static gapRolesBroadcasterCBs_t Broadcaster_BroadcasterCBs = {Broadcaster_StateNotificationCB, NULL};
 
 // 按键下降沿中断：只记录事件，具体处理放到300ms任务里
 __INTERRUPT
@@ -797,7 +795,7 @@ void Broadcaster_Init(void)
     bthomeData[BTHOME_VERSION_OFFSET + 1] = (uint8_t)FW_VERSION_LEN;
     tmos_memcpy(&bthomeData[BTHOME_VERSION_OFFSET + 2], FW_VERSION_STRING, FW_VERSION_LEN);
 
-    uint8_t adv_type = GAP_ADTYPE_ADV_NONCONN_IND;
+    uint8_t adv_type = GAP_ADTYPE_ADV_IND;
     GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, 1, &adv_type);
 
     uint16_t adv_int = SBP_ADVERT_INTERVAL;
@@ -855,8 +853,7 @@ uint16_t Broadcaster_ProcessEvent(uint8_t task_id, uint16_t events)
 
     if(events & SBP_START_DEVICE_EVT)
     {
-        bStatus_t status = GAPRole_BroadcasterStartDevice(&Broadcaster_BroadcasterCBs);
-        (void)status;
+        /* Peripheral_InitNormal owns the GAP Role in normal mode. */
         // 读取历史燃气数据
         ReadFromDataFlash();
         // 配置ADC引脚
@@ -876,7 +873,7 @@ uint16_t Broadcaster_ProcessEvent(uint8_t task_id, uint16_t events)
         sample_tcrt5000_voltage();
 
         // 需要广播
-        if(s_ucBroadcasterCnt)
+        if(s_ucBroadcasterCnt && !Peripheral_NormalLinkActive())
         {
             s_ucBroadcasterCnt--;
             tmos_start_task(Broadcaster_TaskID, SBP_ADVERT_DISABLE_EVT, SBP_ADVERT_DISABLE_EVT_PERIOD * SBP_ADVERT_DISABLE_EVT_TIME);
@@ -905,17 +902,12 @@ uint16_t Broadcaster_ProcessEvent(uint8_t task_id, uint16_t events)
 
     if(events & SBP_ADVERT_DISABLE_EVT)
     {
-        gaprole_advert_enable(FALSE);
+        if(!Peripheral_NormalLinkActive())
+        {
+            gaprole_advert_enable(FALSE);
+        }
         return (events ^ SBP_ADVERT_DISABLE_EVT);
     }
 
     return 0;
-}
-
-static void Broadcaster_StateNotificationCB(gapRole_States_t newState)
-{
-    switch(newState)
-    {
-        default: break;
-    }
 }

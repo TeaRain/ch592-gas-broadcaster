@@ -50,6 +50,7 @@
 #define CMD_IAP_CRC32          0x85               // CRC32 of Image B
 #define CMD_IAP_SET_GAS        0x86               // set gas reading
 #define CMD_IAP_SET_THRESHOLD  0x87               // set pulse threshold
+#define CMD_IAP_ENTER_OTA      0x88               // normal-mode request to reboot into OTA
 
 /* 数据帧长度定义 */
 #define IAP_LEN                247
