@@ -77,15 +77,7 @@ static uint8_t s_bGasStoreLoaded = FALSE; /* log state scanned at least once */
 static uint32_t s_u32LastSaved = 0;       /* value of the last accepted record */
 
 #define FW_VERSION_LEN (sizeof(FW_VERSION_STRING) - 1)
-static uint8_t bthomeData[BthomeAdvertSize(FW_VERSION_LEN)] =
-{
-    0x02, 0x01, 0x06,             // Flags data
-    0x0F, 0x16, 0xD2, 0xFC, 0x40, // 服务数据bthomev2
-    0x0C, 0x00, 0x00,             // 电池电压，0.001V/bit
-    0x3D, 0x00, 0x00,             // ADC反射差分，1CNT/bit
-    0x4C, 0x00, 0x00, 0x00, 0x00, // 燃气表读数，0.001立方米/bit
-    0x3E, 0x00, 0x00, 0x00, 0x00  // threshold feedback (BTHome count32)
-};
+static uint8_t bthomeData[BthomeAdvertSize(FW_VERSION_LEN)] = BTHOME_DATA_INITIALISER;
 
 // 按键下降沿中断：只记录事件，具体处理放到300ms任务里
 __INTERRUPT
@@ -593,10 +585,7 @@ void updata_bthome_data()
     bthomeData[10] = (s_u16BatVolt >> 8) & 0xFF;
     bthomeData[12] = s_u16Tcrt5000 & 0xFF;
     bthomeData[13] = (s_u16Tcrt5000 >> 8) & 0xFF;
-    bthomeData[15] = s_u32GasMeter & 0xFF;
-    bthomeData[16] = (s_u32GasMeter >> 8) & 0xFF;
-    bthomeData[17] = (s_u32GasMeter >> 16) & 0xFF;
-    bthomeData[18] = (s_u32GasMeter >> 24) & 0xFF;
+    BthomeWriteGas(bthomeData, s_u32GasMeter);
     BthomeWriteThreshold(bthomeData, s_u16TcrtThreshold);
 }
 
