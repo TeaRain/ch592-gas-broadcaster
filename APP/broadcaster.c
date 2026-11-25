@@ -4,6 +4,7 @@
 #include "peripheral.h"
 #include "gas_log_policy.h"
 #include "scheduled_ota.h"
+#include "ota_entry_policy.h"
 #include "gas_counter_policy.h"
 #include "threshold_policy.h"
 #include "threshold_key_policy.h"
@@ -736,7 +737,7 @@ uint8_t OtaMode_IsScheduledRequest(void)
            OtaRequestReasonIsScheduled(rec.reserved[0]);
 }
 
-static void OtaMode_WriteRequest(uint8_t reason)
+static void OtaMode_WriteFlashRequest(uint8_t reason)
 {
     ota_mode_record_t rec;
     rec.magic = OTA_MODE_MAGIC;
@@ -745,6 +746,13 @@ static void OtaMode_WriteRequest(uint8_t reason)
     rec.reserved[2] = 0;
     EEPROM_ERASE(OTA_MODE_FLASH_ADDR, EEPROM_BLOCK_SIZE);
     EEPROM_WRITE(OTA_MODE_FLASH_ADDR, (uint8_t *)&rec, sizeof(rec));
+}
+
+static void OtaMode_WriteRequest(uint8_t reason)
+{
+    OtaEntryFlushBeforeRequest(
+        SaveToDataFlashNow, OtaMode_WriteFlashRequest, reason
+    );
 }
 
 void OtaMode_Request(void)

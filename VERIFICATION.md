@@ -1,8 +1,33 @@
 # CH592 固件与 HA 修复验证记录
 
-日期：2026-11-23
+日期：2026-11-26
 
-## 当前：1.6.1 BTHome 对象顺序合规
+## 当前：1.6.2 OTA 前保存燃气计数
+
+- 实机根因：1.5.0 → 1.6.1 自然 OTA 后原始计数从 4.04 m³回退到最后一次持久化的
+  3.95 m³，损失 0.09 m³；HA 保持总量 2021.37 m³并标记 `raw_reset_detected=true`。
+- 共同 `OtaMode_WriteRequest()` 现在通过生产助手先执行 `SaveToDataFlashNow()`，再以原
+  reason 写 OTA 请求；manual 和 scheduled 两个公开入口均复用该路径，周期保存阈值不变。
+- 新 C 测试在旧代码上因缺少生产助手失败，实现后验证每次请求事件严格为 SAVE→WRITE、
+  回调各一次且 manual/scheduled reason 不变。RISC-V objdump 也确认两个公开入口的机器码
+  均先调用 `SaveToDataFlashNow`，再跳转 `OtaMode_WriteFlashRequest`。
+- GCC 13.2.0、`rv32imac_zicsr_zifencei`、`INT_SOFT`、picolibc 1.8.6 全量重编译并链接
+  35 个源文件；GPIOB/RTC/BLE 中断 `mret` 检查通过。SDK 保留既有 GPIO、DisableAllIRQ、
+  I2C 警告，IAP 宿主测试保留既有 main 返回类型警告。
+- 与 1.6.1 对象文件对照，只有 `APP/broadcaster.o` 有实质变化；`peripheral.o` 和
+  `gattprofile.o` 仅调试路径不同，去调试信息后逐字节一致。
+- 固件 Python 14 项、HA 58 项通过；9 个 C 测试程序通过，其中 3 个由 Python 套件驱动，
+  另 6 个单独编译运行。
+- APP bin：156952 字节，CRC32 `0x8043E30E`，SHA-256
+  `18cfc3142328e6b46c01392c6ef9e77cd5503ffffce15007632623330a33b92c`。
+- 完整 HEX：439140 文件字节，SHA-256
+  `9d959a35ce8cd5257434494ed10c3b5ebfebe36f54bca5182de9dd41cdf32d13`；APP 区与 bin
+  逐字节一致，2700 个非 APP 字节与 1.6.1 完全一致。
+- **尚未实机验证**：新保存路径在 natural/remote OTA 中保持最后不足 0.1 m³余量。
+  当前 1.6.1 首次升到 1.6.2 仍可能重复旧问题，应按 B 先保存再升级或升级后校准；
+  本轮未修改 HA 校准，也未触发新 OTA。
+
+## 历史：1.6.1 BTHome 对象顺序合规
 
 - 普通 BTHome 对象顺序修正为 `0x0C / 0x3D / 0x3E / 0x4C / 0x53`；交换完整五字节对象，
   阈值写入偏移改为 14，燃气写入偏移改为 19，字段含义与 uint32 小端编码不变。
@@ -17,8 +42,10 @@
   `a41a42d9447bce44ea6a704d1915a748850f13062e26b00c117d9f1598e73254`。
 - 完整 HEX：439088 字节，SHA-256
   `0d1023dd0f291672afe7424d623bf9849e60209b090bd6ad2ec3176599e958f7`。
-- **尚未实机验证**：1.6.1 OTA、升级前后原始计数/offset/阈值保持、广播中各字段解析、
-  HA 顺序警告计数停止增长。1.6.0 的普通窗口连接可靠性和功耗验证也仍按下节记录等待实机结果。
+- **实机结果（2026-11-26）**：自然三天窗口自动升级成功，协议 8，耗时 40.7 秒，VDD
+  2869 mV，阈值 100 和原 BTHome/CH592 实体保持。原始计数从 4.04 回退到 3.95 m³，
+  暴露 OTA 前未保存余量的旧问题，由 1.6.2 修复；HA 防重置保护保持总量不变。
+  HA 顺序警告是否停止增长及 1.6.0 普通窗口功耗仍需继续观察。
 
 ## 历史：1.6.0 / 0.8.0 普通窗口免按键 OTA
 
