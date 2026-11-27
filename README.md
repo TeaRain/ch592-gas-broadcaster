@@ -1,6 +1,6 @@
-# CH592 燃气表 BLE 广播器固件
+# GasPulse 蓝牙燃气表固件
 
-CH592（RISC-V，BLE 5.4）燃气表读数器固件，使用 CR2032 供电，TCRT5000 反射式
+GasPulse Firmware（CH592，RISC-V，BLE 5.4）燃气表读数器固件，使用 CR2032 供电，TCRT5000 反射式
 红外对管采样燃气表转轮，通过 **BTHome v2** 广播：
 
 | 对象 | 内容 |
@@ -213,13 +213,31 @@ python tools/make_ota_images.py
 
 ## 发布固件（给 HA 自动检查用）
 
+日常只维护新名称 canonical 仓库。普通发布：
+
 ```bash
 python tools/publish_firmware.py --repo . --notes "改了什么" --push
 ```
 
+仓库迁移后同时更新旧 Gitee raw 兼容地址时：
+
+```bash
+python tools/publish_firmware.py --repo . \
+  --legacy-repo ../../releases/legacy-gitee/ch592-gas-broadcaster \
+  --push --remote origin
+```
+
 把 `obj/Broadcaster_app.bin`、sidecar、`Broadcaster_full.hex` 复制到本仓库
-`firmware/`，并生成 `firmware/manifest.json`；`--push` 会提交并推送到已配置的
-远程（`origin` = Gitee，`github` = GitHub）。
+`firmware/`，并生成 `firmware/manifest.json`。发布提交只接受
+`ch592_ota.bin`、`ch592_ota.bin.json`、`Broadcaster_full.hex` 和 `manifest.json`
+白名单，不会把恢复用 HEX 或其他未跟踪文件一并提交。
+
+脚本在复制或改写任何发布文件前检查 canonical 和 legacy 的 staged 状态，发现已有修改即停止，
+不吞掉用户工作；同一发布重复运行会保留原 `built`、跳过无变化提交并继续补推。
+配置 `--legacy-repo` 后，旧镜像先推送并用远端 SHA 核验，成功后才推送 canonical 远端。
+canonical 多个远端分别尝试，显式 `--remote` 指定的远端未配置也会令总体失败，配置后可重跑；
+默认 `origin, github` 中不存在的远端仍按可选镜像跳过。任一失败可用同一命令补推，
+不会 force push。旧 Gitee 仅作代码备份和 HA 固件 raw 回退，不是 HACS 来源。
 
 `manifest.json`：
 
