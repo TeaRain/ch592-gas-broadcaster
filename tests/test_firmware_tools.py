@@ -441,6 +441,40 @@ class PublisherGitTests(unittest.TestCase):
         self.assertNotEqual(raised.exception.code, 0)
         self.assert_staged_manifest_preserved(self.repo, manifest, head)
 
+    def test_commit_failure_unstages_whitelist_and_rerun_recovers(self):
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\necho 'hook rejected' >&2\nexit 1\n", encoding="ascii")
+        hook.chmod(0o755)
+        git(self.repo, "config", "core.hooksPath", str(hooks))
+
+        with self.assertRaises(SystemExit) as raised:
+            self.run_publisher()
+        self.assertNotEqual(raised.exception.code, 0)
+
+        self.assertEqual(
+            git(self.repo, "rev-parse", "HEAD").stdout.strip(), self.initial
+        )
+        self.assertEqual(
+            git(self.repo, "diff", "--cached", "--name-only").stdout.strip(), ""
+        )
+        self.assertTrue((self.repo / "firmware" / "ch592_ota.bin").is_file())
+        self.assertIn(
+            "?? firmware/", git(self.repo, "status", "--porcelain").stdout
+        )
+
+        git(self.repo, "config", "--unset", "core.hooksPath")
+        time.sleep(1.1)
+        self.assertEqual(self.run_publisher(), 0)
+        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertNotEqual(head, self.initial)
+        self.assertEqual(
+            git(self.repo, "diff", "--cached", "--name-only").stdout.strip(), ""
+        )
+        self.assertEqual(remote_head(self.origin), head)
+        self.assertEqual(remote_head(self.github), head)
+
     def test_legacy_preflight_happens_before_canonical_writes(self):
         legacy, _ = self.make_legacy()
         manifest, legacy_head = self.make_staged_manifest(legacy)
@@ -526,40 +560,6 @@ class PublisherGitTests(unittest.TestCase):
         for relative in expected:
             self.assertEqual((legacy / relative).read_bytes(), (self.repo / relative).read_bytes())
         self.assertFalse((legacy / "firmware" / recovery.name).exists())
-
-    def test_commit_failure_unstages_whitelist_and_rerun_recovers(self):
-        hooks = self.root / "hooks"
-        hooks.mkdir()
-        hook = hooks / "pre-commit"
-        hook.write_text("#!/bin/sh\necho 'hook rejected' >&2\nexit 1\n", encoding="ascii")
-        hook.chmod(0o755)
-        git(self.repo, "config", "core.hooksPath", str(hooks))
-
-        with self.assertRaises(SystemExit) as raised:
-            self.run_publisher()
-        self.assertNotEqual(raised.exception.code, 0)
-
-        self.assertEqual(
-            git(self.repo, "rev-parse", "HEAD").stdout.strip(), self.initial
-        )
-        self.assertEqual(
-            git(self.repo, "diff", "--cached", "--name-only").stdout.strip(), ""
-        )
-        self.assertTrue((self.repo / "firmware" / "ch592_ota.bin").is_file())
-        self.assertIn(
-            "?? firmware/", git(self.repo, "status", "--porcelain").stdout
-        )
-
-        git(self.repo, "config", "--unset", "core.hooksPath")
-        time.sleep(1.1)
-        self.assertEqual(self.run_publisher(), 0)
-        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
-        self.assertNotEqual(head, self.initial)
-        self.assertEqual(
-            git(self.repo, "diff", "--cached", "--name-only").stdout.strip(), ""
-        )
-        self.assertEqual(remote_head(self.origin), head)
-        self.assertEqual(remote_head(self.github), head)
 
 
 def types_module(name, **attributes):
