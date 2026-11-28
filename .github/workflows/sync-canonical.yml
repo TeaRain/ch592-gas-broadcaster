@@ -13,18 +13,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Sync tracked files from canonical Gitee master
+      - name: Sync all files from canonical Gitee master
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          cloned=false
+          for attempt in 1 2 3 4; do
+            rm -rf /tmp/gaspulse-firmware-canonical
+            if timeout 120 git clone --depth 1 https://gitee.com/zigbridge/gaspulse-firmware.git /tmp/gaspulse-firmware-canonical; then
+              cloned=true
+              break
+            fi
+            sleep 10
+          done
+          "$cloned"
+          rsync -a --delete \
+            --exclude=.git \
+            --exclude=.github/workflows/sync-canonical.yml \
+            /tmp/gaspulse-firmware-canonical/ ./
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          base="https://gitee.com/zigbridge/gaspulse-firmware/raw/master"
-          while IFS= read -r file; do
-            mkdir -p "$(dirname "$file")"
-            curl -fsSL --retry 3 "$base/$file" -o "$file"
-          done < <(git ls-files | grep -v '^\.github/workflows/sync-canonical\.yml$')
           git add -A
           if git diff --cached --quiet; then
             echo "nothing to sync"
