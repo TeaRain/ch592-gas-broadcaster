@@ -181,7 +181,7 @@ class FirmwareToolTests(unittest.TestCase):
         else:
             self.fail("zero block size was accepted")
 
-    def _run_publisher_with_git_failure(self, failing_command):
+    def _run_publisher_with_git_failure(self, failing_command, record=None):
         module = load_module(
             "publish_firmware_under_test", REPO / "tools/publish_firmware.py"
         )
@@ -207,12 +207,12 @@ class FirmwareToolTests(unittest.TestCase):
             repo.mkdir()
 
             added = False
-            record = []
 
             def fake_run(command, **kwargs):
                 nonlocal added
                 operation = command[3] if len(command) > 3 else ""
-                record.append(command[3:])
+                if record is not None:
+                    record.append(command[3:])
                 if operation == "add":
                     added = True
                 if operation == "diff" and "--quiet" in command:
@@ -249,24 +249,25 @@ class FirmwareToolTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as raised:
                     module.main()
             self.assertNotEqual(raised.exception.code, 0)
-            resets = [command for command in record if command[0] == "reset"]
-            self.assertEqual(len(resets), 1)
-            paths = resets[0][3:]
-            self.assertTrue(paths)
-            production = load_module(
-                "publish_firmware_constants", REPO / "tools/publish_firmware.py"
-            )
-            self.assertTrue(
-                all(
-                    path.startswith("firmware/")
-                    and any(path.endswith(name) for name in production.PUBLISHED_FILENAMES)
-                    for path in paths
-                ),
-                resets,
-            )
 
     def test_publisher_reports_commit_failure_and_rolls_back_staging(self):
-        self._run_publisher_with_git_failure("commit")
+        record: list[list[str]] = []
+        self._run_publisher_with_git_failure("commit", record)
+        resets = [command for command in record if command[0] == "reset"]
+        self.assertEqual(len(resets), 1)
+        production = load_module(
+            "publish_firmware_constants", REPO / "tools/publish_firmware.py"
+        )
+        paths = resets[0][3:]
+        self.assertTrue(paths)
+        self.assertTrue(
+            all(
+                path.startswith("firmware/")
+                and any(path.endswith(name) for name in production.PUBLISHED_FILENAMES)
+                for path in paths
+            ),
+            resets,
+        )
 
     def test_publisher_reports_push_failure(self):
         self._run_publisher_with_git_failure("push")
@@ -414,7 +415,7 @@ class PublisherGitTests(unittest.TestCase):
         )
 
     def make_staged_manifest(self, repo):
-        manifest = repo / "firmware/manifest.json"
+        manifest = repo / "firmware" / "manifest.json"
         manifest.parent.mkdir(exist_ok=True)
         manifest.write_text('{"state": "head"}\n', encoding="utf-8")
         git(repo, "add", "--", "firmware/manifest.json")
@@ -525,6 +526,40 @@ class PublisherGitTests(unittest.TestCase):
         for relative in expected:
             self.assertEqual((legacy / relative).read_bytes(), (self.repo / relative).read_bytes())
         self.assertFalse((legacy / "firmware" / recovery.name).exists())
+
+    def test_commit_failure_unstages_whitelist_and_rerun_recovers(self):
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\necho 'hook rejected' >&2\nexit 1\n", encoding="ascii")
+        hook.chmod(0o755)
+        git(self.repo, "config", "core.hooksPath", str(hooks))
+
+        with self.assertRaises(SystemExit) as raised:
+            self.run_publisher()
+        self.assertNotEqual(raised.exception.code, 0)
+
+        self.assertEqual(
+            git(self.repo, "rev-parse", "HEAD").stdout.strip(), self.initial
+        )
+        self.assertEqual(
+            git(self.repo, "diff", "--cached", "--name-only").stdout.strip(), ""
+        )
+        self.assertTrue((self.repo / "firmware" / "ch592_ota.bin").is_file())
+        self.assertIn(
+            "?? firmware/", git(self.repo, "status", "--porcelain").stdout
+        )
+
+        git(self.repo, "config", "--unset", "core.hooksPath")
+        time.sleep(1.1)
+        self.assertEqual(self.run_publisher(), 0)
+        head = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.assertNotEqual(head, self.initial)
+        self.assertEqual(
+            git(self.repo, "diff", "--cached", "--name-only").stdout.strip(), ""
+        )
+        self.assertEqual(remote_head(self.origin), head)
+        self.assertEqual(remote_head(self.github), head)
 
 
 def types_module(name, **attributes):
