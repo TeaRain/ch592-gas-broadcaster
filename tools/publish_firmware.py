@@ -134,11 +134,14 @@ def stage_and_commit(repo: Path, version: str, relative_paths: list[str]) -> boo
         COMMIT_ATTRIBUTION,
     )
     if committed.returncode != 0:
+        # preflight_clean_index guaranteed an empty index before our add, so
+        # resetting the whitelist paths restores the index without touching
+        # the worktree or anything the user staged.
         rollback = _git(repo, "reset", "-q", "--", *relative_paths)
         if rollback.returncode != 0:
             detail = (rollback.stderr or rollback.stdout).strip()
             print(f"error: 回滚本次暂存失败，需人工检查 index: {detail}", file=sys.stderr)
-        _require(committed, "git commit")
+    _require(committed, "git commit")
     print(f"committed firmware {version} in {repo}")
     return True
 
