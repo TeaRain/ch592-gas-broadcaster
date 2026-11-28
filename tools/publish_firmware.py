@@ -133,7 +133,12 @@ def stage_and_commit(repo: Path, version: str, relative_paths: list[str]) -> boo
         "-m",
         COMMIT_ATTRIBUTION,
     )
-    _require(committed, "git commit")
+    if committed.returncode != 0:
+        rollback = _git(repo, "reset", "-q", "--", *relative_paths)
+        if rollback.returncode != 0:
+            detail = (rollback.stderr or rollback.stdout).strip()
+            print(f"error: 回滚本次暂存失败，需人工检查 index: {detail}", file=sys.stderr)
+        _require(committed, "git commit")
     print(f"committed firmware {version} in {repo}")
     return True
 
