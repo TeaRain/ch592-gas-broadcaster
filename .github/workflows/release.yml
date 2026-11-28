@@ -29,14 +29,3 @@ jobs:
             echo "creating release $tag"
             gh release create "$tag" --title "$tag" --generate-notes
           done
-
-      - name: Release the firmware manifest version
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          version=$(jq -er '.version' firmware/manifest.json)
-          tag="v${version}"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --target master --title "CH592 Gas Broadcaster ${version}" --generate-notes
-          fi
