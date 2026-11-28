@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -206,10 +207,12 @@ class FirmwareToolTests(unittest.TestCase):
             repo.mkdir()
 
             added = False
+            record = []
 
             def fake_run(command, **kwargs):
                 nonlocal added
                 operation = command[3] if len(command) > 3 else ""
+                record.append(command[3:])
                 if operation == "add":
                     added = True
                 if operation == "diff" and "--quiet" in command:
@@ -246,8 +249,23 @@ class FirmwareToolTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as raised:
                     module.main()
             self.assertNotEqual(raised.exception.code, 0)
+            resets = [command for command in record if command[0] == "reset"]
+            self.assertEqual(len(resets), 1)
+            paths = resets[0][3:]
+            self.assertTrue(paths)
+            production = load_module(
+                "publish_firmware_constants", REPO / "tools/publish_firmware.py"
+            )
+            self.assertTrue(
+                all(
+                    path.startswith("firmware/")
+                    and any(path.endswith(name) for name in production.PUBLISHED_FILENAMES)
+                    for path in paths
+                ),
+                resets,
+            )
 
-    def test_publisher_reports_commit_failure(self):
+    def test_publisher_reports_commit_failure_and_rolls_back_staging(self):
         self._run_publisher_with_git_failure("commit")
 
     def test_publisher_reports_push_failure(self):
@@ -396,7 +414,7 @@ class PublisherGitTests(unittest.TestCase):
         )
 
     def make_staged_manifest(self, repo):
-        manifest = repo / "firmware" / "manifest.json"
+        manifest = repo / "firmware/manifest.json"
         manifest.parent.mkdir(exist_ok=True)
         manifest.write_text('{"state": "head"}\n', encoding="utf-8")
         git(repo, "add", "--", "firmware/manifest.json")
